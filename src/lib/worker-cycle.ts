@@ -1,5 +1,6 @@
 import { signClick } from "./crypto";
 import { composeEmail, formatAddress } from "./render";
+import { runAutomationCycle } from "./automations";
 import {
   campaignIsSending,
   claimBatch,
@@ -21,6 +22,11 @@ function sleep(ms: number): Promise<void> {
 async function processJob(job: SendJob): Promise<void> {
   if (!(await campaignIsSending(job.campaignId))) {
     await markRecipient(job.recipientId, "pending", "");
+    return;
+  }
+  if (!job.html.trim() || !job.subject.trim()) {
+    // An automation step whose template was deleted after the message was queued.
+    await markRecipient(job.recipientId, "failed", "The template for this step no longer exists.");
     return;
   }
   if (job.contactStatus !== "subscribed") {
@@ -98,4 +104,11 @@ export async function runBatch(limit = 5): Promise<number> {
   }
   await finishCampaigns();
   return jobs.length;
+}
+
+/** One worker pass: move automations forward, then send whatever is queued. Returns the amount of work done. */
+export async function runWorkerCycle(limit = 5): Promise<number> {
+  const advanced = await runAutomationCycle();
+  const sent = await runBatch(limit);
+  return advanced + sent;
 }

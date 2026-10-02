@@ -126,9 +126,58 @@ CREATE TABLE IF NOT EXISTS suppressions (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS automations (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  list_id TEXT REFERENCES lists(id) ON DELETE SET NULL,
+  campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'draft',
+  origin TEXT NOT NULL DEFAULT '',
+  trigger_since TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS automation_steps (
+  id TEXT PRIMARY KEY,
+  automation_id TEXT NOT NULL REFERENCES automations(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  template_id TEXT REFERENCES templates(id) ON DELETE SET NULL,
+  delay_minutes INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS automation_enrollments (
+  id TEXT PRIMARY KEY,
+  automation_id TEXT NOT NULL REFERENCES automations(id) ON DELETE CASCADE,
+  contact_id TEXT NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'active',
+  current_step INTEGER NOT NULL DEFAULT 0,
+  next_run_at TEXT NOT NULL,
+  stop_reason TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  completed_at TEXT,
+  UNIQUE(automation_id, contact_id)
+);
+
+CREATE TABLE IF NOT EXISTS automation_sends (
+  enrollment_id TEXT NOT NULL REFERENCES automation_enrollments(id) ON DELETE CASCADE,
+  step_id TEXT NOT NULL REFERENCES automation_steps(id) ON DELETE CASCADE,
+  recipient_id TEXT NOT NULL UNIQUE REFERENCES recipients(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (enrollment_id, step_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_lists_user ON lists(user_id);
 CREATE INDEX IF NOT EXISTS idx_contacts_user ON contacts(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_recipients_status ON recipients(campaign_id, status);
 CREATE INDEX IF NOT EXISTS idx_recipients_pending ON recipients(status, claimed_at);
 CREATE INDEX IF NOT EXISTS idx_events_campaign ON events(campaign_id, type);
+CREATE INDEX IF NOT EXISTS idx_automations_user ON automations(user_id, status);
+CREATE INDEX IF NOT EXISTS idx_automation_steps_order ON automation_steps(automation_id, position);
+CREATE INDEX IF NOT EXISTS idx_enrollments_due ON automation_enrollments(status, next_run_at);
+CREATE INDEX IF NOT EXISTS idx_enrollments_contact ON automation_enrollments(contact_id);
 `;
