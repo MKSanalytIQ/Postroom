@@ -31,11 +31,11 @@ export function PageHeader({
 
 export function Pill({ status }: { status: string }) {
   const tone =
-    status === "sent" || status === "subscribed"
+    status === "sent" || status === "subscribed" || status === "active" || status === "completed"
       ? "good"
       : status === "failed" || status === "unsubscribed"
         ? "bad"
-        : status === "sending" || status === "paused"
+        : status === "sending" || status === "paused" || status === "stopped"
           ? "warn"
           : "";
   return <span className={`pill ${tone}`}>{status}</span>;

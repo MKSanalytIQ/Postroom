@@ -11,6 +11,7 @@ const LINKS = [
   ["/app/contacts", "Contacts"],
   ["/app/templates", "Templates"],
   ["/app/campaigns", "Campaigns"],
+  ["/app/automations", "Automations"],
   ["/app/settings", "Settings"],
 ];
 

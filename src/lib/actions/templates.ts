@@ -27,7 +27,12 @@ export async function saveTemplateAction(formData: FormData): Promise<void> {
 
 export async function deleteTemplateAction(formData: FormData): Promise<void> {
   const user = await requireUser();
-  await deleteTemplate(user.id, String(formData.get("id") || ""));
+  try {
+    await deleteTemplate(user.id, String(formData.get("id") || ""));
+  } catch (error) {
+    if (error instanceof UserError) redirect(withMessage("/app/templates", "error", error.message));
+    throw error;
+  }
   redirect(withMessage("/app/templates", "notice", "Template deleted."));
 }
 
