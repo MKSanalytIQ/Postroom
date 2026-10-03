@@ -1,13 +1,16 @@
 import { newId, newToken } from "./crypto";
-import { getAccount, getList, getTemplate } from "./queries";
+import { getAccount, getList, getTemplate, skipQueuedForStoppedEnrollments } from "./queries";
+import { DEFAULT_TIMEZONE, isValidTimeZone, nextAllowedTime, parseDays, serializeDays, validateWindow, type SendWindow } from "./send-window";
 import { readySql, type Sql } from "./sql";
 import { addMinutesIso, nowIso } from "./time";
 import type {
   Automation,
+  AutomationRules,
   AutomationStatus,
   AutomationStep,
   EnrollmentCounts,
   EnrollmentRow,
+  StepStats,
 } from "./types";
 import { UserError } from "./user-error";
 import { isEmail, normalizeEmail } from "./validators";
@@ -17,6 +20,8 @@ import { isEmail, normalizeEmail } from "./validators";
 // - Every automation owns one hidden campaign (status 'automation'). Its recipients, deliveries,
 //   open/click events and unsubscribe events reuse the normal send pipeline and tracking.
 // - The worker (runAutomationCycle) does two things each pass:
+//     0. applyExitConditions: stops people who joined the automation's "exit list". (Clicking a link is
+//        handled when the click is recorded, see recordClick in queries.ts.)
 //     1. enrollNewMembers: enrolls subscribed people who joined the list after the automation was
 //        activated. UNIQUE(automation_id, contact_id) means nobody is enrolled twice.
 //     2. processDueEnrollments: runs the next step of each due enrollment. A step is claimed with a
@@ -400,7 +405,204 @@ export async function latestDeliveries(
   });
 }
 
+
+// ---------- rules: exit conditions and send window ----------
+
+type RulesRow = {
+  exit_on_click: number | string;
+  exit_list_id: string | null;
+  exit_list_name: string | null;
+  window_enabled: number | string;
+  window_days: string;
+  window_start_hour: number | string;
+  window_end_hour: number | string;
+  timezone: string;
+};
+
+const DEFAULT_RULES: AutomationRules = {
+  exitOnClick: false,
+  exitListId: null,
+  exitListName: null,
+  windowEnabled: false,
+  windowDays: [0, 1, 2, 3, 4, 5, 6],
+  windowStartHour: 9,
+  windowEndHour: 17,
+  timezone: DEFAULT_TIMEZONE,
+};
+
+export async function getRules(userId: string, automationId: string): Promise<AutomationRules> {
+  const sql = await readySql();
+  const row = (await sql
+    .prepare(
+      `SELECT s.exit_on_click, s.exit_list_id, l.name AS exit_list_name, s.window_enabled, s.window_days,
+              s.window_start_hour, s.window_end_hour, s.timezone
+       FROM automation_settings s
+       JOIN automations a ON a.id = s.automation_id
+       LEFT JOIN lists l ON l.id = s.exit_list_id
+       WHERE s.automation_id = ? AND a.user_id = ?`,
+    )
+    .get(automationId, userId)) as RulesRow | null;
+  if (!row) return { ...DEFAULT_RULES };
+  return {
+    exitOnClick: Number(row.exit_on_click) === 1,
+    exitListId: row.exit_list_id,
+    exitListName: row.exit_list_name,
+    windowEnabled: Number(row.window_enabled) === 1,
+    windowDays: parseDays(row.window_days),
+    windowStartHour: Number(row.window_start_hour),
+    windowEndHour: Number(row.window_end_hour),
+    timezone: row.timezone,
+  };
+}
+
+export type RulesInput = {
+  exitOnClick: boolean;
+  exitListId: string | null;
+  windowEnabled: boolean;
+  windowDays: number[];
+  windowStartHour: number;
+  windowEndHour: number;
+  timezone: string;
+};
+
+/** Rules can be changed while the automation runs: they only affect what happens next. */
+export async function saveRules(userId: string, automationId: string, input: RulesInput): Promise<void> {
+  const automation = await requireAutomation(userId, automationId);
+  if (input.exitListId) {
+    if (!(await getList(userId, input.exitListId))) throw new UserError("List not found.");
+    if (input.exitListId === automation.listId) throw new UserError("Choose a different list to exit on than the one that starts the automation.");
+  }
+  let window: SendWindow = {
+    days: input.windowDays,
+    startHour: input.windowStartHour,
+    endHour: input.windowEndHour,
+    timezone: input.timezone || DEFAULT_TIMEZONE,
+  };
+  if (input.windowEnabled) {
+    try {
+      window = validateWindow(window);
+    } catch (error) {
+      throw new UserError(error instanceof Error ? error.message : "The send window is not valid.");
+    }
+  } else {
+    // Not in use, so keep whatever is sane and fall back to the defaults for the rest.
+    const days = parseDays(serializeDays(window.days));
+    window = {
+      days: days.length ? days : DEFAULT_RULES.windowDays,
+      startHour: Number.isInteger(window.startHour) && window.startHour >= 0 && window.startHour <= 23 ? window.startHour : DEFAULT_RULES.windowStartHour,
+      endHour: Number.isInteger(window.endHour) && window.endHour >= 1 && window.endHour <= 24 ? window.endHour : DEFAULT_RULES.windowEndHour,
+      timezone: isValidTimeZone(window.timezone) ? window.timezone : DEFAULT_TIMEZONE,
+    };
+    if (window.endHour <= window.startHour) {
+      window.startHour = DEFAULT_RULES.windowStartHour;
+      window.endHour = DEFAULT_RULES.windowEndHour;
+    }
+  }
+  const now = nowIso();
+  const sql = await readySql();
+  await sql
+    .prepare(
+      `INSERT INTO automation_settings
+         (automation_id, exit_on_click, exit_list_id, window_enabled, window_days, window_start_hour, window_end_hour, timezone, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (automation_id) DO UPDATE SET
+         exit_on_click = excluded.exit_on_click, exit_list_id = excluded.exit_list_id,
+         window_enabled = excluded.window_enabled, window_days = excluded.window_days,
+         window_start_hour = excluded.window_start_hour, window_end_hour = excluded.window_end_hour,
+         timezone = excluded.timezone, updated_at = excluded.updated_at`,
+    )
+    .run(
+      automationId,
+      input.exitOnClick ? 1 : 0,
+      input.exitListId,
+      input.windowEnabled ? 1 : 0,
+      serializeDays(window.days),
+      window.startHour,
+      window.endHour,
+      window.timezone,
+      now,
+    );
+  await sql.prepare("UPDATE automations SET updated_at = ? WHERE id = ?").run(now, automationId);
+}
+
+async function windowFor(tx: Sql, automationId: string): Promise<SendWindow | null> {
+  const row = (await tx
+    .prepare(
+      "SELECT window_enabled, window_days, window_start_hour, window_end_hour, timezone FROM automation_settings WHERE automation_id = ?",
+    )
+    .get(automationId)) as
+    | { window_enabled: number | string; window_days: string; window_start_hour: number | string; window_end_hour: number | string; timezone: string }
+    | null;
+  if (!row || Number(row.window_enabled) !== 1) return null;
+  return {
+    days: parseDays(row.window_days),
+    startHour: Number(row.window_start_hour),
+    endHour: Number(row.window_end_hour),
+    timezone: row.timezone,
+  };
+}
+
+// ---------- per-step stats ----------
+
+/** Sent / failed / waiting messages and unique opens and clicks for each email step. */
+export async function stepStats(userId: string, automationId: string): Promise<Map<string, StepStats>> {
+  const sql = await readySql();
+  const rows = (await sql
+    .prepare(
+      `SELECT s.step_id,
+         SUM(CASE WHEN r.status = 'sent' THEN 1 ELSE 0 END) AS sent,
+         SUM(CASE WHEN r.status = 'failed' THEN 1 ELSE 0 END) AS failed,
+         SUM(CASE WHEN r.status IN ('pending', 'sending') THEN 1 ELSE 0 END) AS waiting,
+         SUM(CASE WHEN r.opened_at IS NOT NULL THEN 1 ELSE 0 END) AS opens,
+         SUM(CASE WHEN r.clicked_at IS NOT NULL THEN 1 ELSE 0 END) AS clicks
+       FROM automation_sends s
+       JOIN automation_steps st ON st.id = s.step_id
+       JOIN automations a ON a.id = st.automation_id
+       JOIN recipients r ON r.id = s.recipient_id
+       WHERE st.automation_id = ? AND a.user_id = ?
+       GROUP BY s.step_id`,
+    )
+    .all(automationId, userId)) as Record<string, string | number | null>[];
+  return new Map(
+    rows.map((row) => [
+      String(row.step_id),
+      {
+        stepId: String(row.step_id),
+        sent: Number(row.sent ?? 0),
+        failed: Number(row.failed ?? 0),
+        waiting: Number(row.waiting ?? 0),
+        uniqueOpens: Number(row.opens ?? 0),
+        uniqueClicks: Number(row.clicks ?? 0),
+      },
+    ]),
+  );
+}
+
 // ---------- worker ----------
+
+const EXIT_LIST_PREDICATE = `EXISTS (
+  SELECT 1 FROM automation_settings s
+  JOIN list_contacts lc ON lc.list_id = s.exit_list_id
+  WHERE s.automation_id = automation_enrollments.automation_id
+    AND lc.contact_id = automation_enrollments.contact_id
+    AND lc.created_at >= automation_enrollments.created_at
+)`;
+
+/**
+ * Stops active enrollments whose contact joined the automation's exit list after being enrolled.
+ * (advanceEnrollment also checks this right before each step, so a step is never sent in the gap.)
+ */
+export async function applyExitConditions(): Promise<number> {
+  const sql = await readySql();
+  const stopped = await sql
+    .prepare(
+      `UPDATE automation_enrollments SET status = 'stopped', stop_reason = 'joined exit list', updated_at = ?
+       WHERE status = 'active' AND ${EXIT_LIST_PREDICATE}`,
+    )
+    .run(nowIso());
+  const skipped = await skipQueuedForStoppedEnrollments();
+  return stopped + skipped;
+}
 
 /**
  * Enrolls subscribed people who joined an active automation's list since it was activated.
@@ -417,7 +619,7 @@ export async function enrollNewMembers(limit = 200): Promise<number> {
   for (const automation of automations) {
     const people = (await sql
       .prepare(
-        `SELECT c.id FROM list_contacts lc
+        `SELECT c.id, lc.created_at AS joined_at FROM list_contacts lc
          JOIN contacts c ON c.id = lc.contact_id
          WHERE lc.list_id = ? AND lc.created_at >= ? AND c.status = 'subscribed'
            AND NOT EXISTS (
@@ -425,7 +627,7 @@ export async function enrollNewMembers(limit = 200): Promise<number> {
            )
          ORDER BY lc.created_at LIMIT ?`,
       )
-      .all(automation.list_id, automation.trigger_since, automation.id, limit)) as { id: string }[];
+      .all(automation.list_id, automation.trigger_since, automation.id, limit)) as { id: string; joined_at: string }[];
     if (people.length === 0) continue;
     const now = nowIso();
     enrolled += await sql.transaction(async (tx) => {
@@ -436,7 +638,8 @@ export async function enrollNewMembers(limit = 200): Promise<number> {
       );
       let added = 0;
       for (const person of people) {
-        added += await insert.run(newId(), automation.id, person.id, now, now, now);
+        // created_at is when they joined the list, so "joined the exit list afterwards" is judged from that moment.
+        added += await insert.run(newId(), automation.id, person.id, now, person.joined_at, now);
       }
       return added;
     });
@@ -481,6 +684,13 @@ export async function advanceEnrollment(enrollmentId: string, expectedStep: numb
       )
       .run(now, enrollmentId, expectedStep, now);
     if (claimed === 0) return false;
+    const exited = await tx
+      .prepare(
+        `UPDATE automation_enrollments SET status = 'stopped', stop_reason = 'joined exit list', updated_at = ?
+         WHERE id = ? AND ${EXIT_LIST_PREDICATE}`,
+      )
+      .run(now, enrollmentId);
+    if (exited > 0) return true;
     const row = (await tx
       .prepare(
         `SELECT e.automation_id, a.campaign_id, c.id AS contact_id, c.status AS contact_status, c.email, c.first_name, c.last_name, c.unsub_token
@@ -512,6 +722,17 @@ export async function advanceEnrollment(enrollmentId: string, expectedStep: numb
         .prepare("SELECT 1 AS found FROM automation_sends WHERE enrollment_id = ? AND step_id = ?")
         .get(enrollmentId, step.id);
       if (!already) {
+        // Outside the allowed days/hours: leave the step where it is and try again when the window opens.
+        const window = await windowFor(tx, row.automation_id);
+        if (window) {
+          const opens = nextAllowedTime(new Date(now), window);
+          if (opens && opens.getTime() > new Date(now).getTime()) {
+            await tx
+              .prepare("UPDATE automation_enrollments SET next_run_at = ?, updated_at = ? WHERE id = ?")
+              .run(opens.toISOString(), now, enrollmentId);
+            return true;
+          }
+        }
         const recipientId = newId();
         // A step whose template was deleted is recorded as a failure instead of being silently skipped.
         const missing = step.template_id === null;
@@ -571,7 +792,8 @@ export async function processDueEnrollments(limit = 50): Promise<number> {
 
 /** One automation pass for the worker. Returns the number of enrollments created or advanced. */
 export async function runAutomationCycle(): Promise<number> {
+  const exited = await applyExitConditions();
   const enrolled = await enrollNewMembers();
   const advanced = await processDueEnrollments();
-  return enrolled + advanced;
+  return exited + enrolled + advanced;
 }

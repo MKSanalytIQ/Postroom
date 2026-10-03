@@ -202,3 +202,24 @@ export type EnrollmentRow = {
   createdAt: string;
   completedAt: string | null;
 };
+
+export type AutomationRules = {
+  exitOnClick: boolean;
+  exitListId: string | null;
+  exitListName: string | null;
+  windowEnabled: boolean;
+  /** Allowed weekdays, 0 = Sunday. */
+  windowDays: number[];
+  windowStartHour: number;
+  windowEndHour: number;
+  timezone: string;
+};
+
+export type StepStats = {
+  stepId: string;
+  sent: number;
+  failed: number;
+  waiting: number;
+  uniqueOpens: number;
+  uniqueClicks: number;
+};

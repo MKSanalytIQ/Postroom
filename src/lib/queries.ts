@@ -1095,6 +1095,32 @@ export async function recordClick(token: string, url: string): Promise<void> {
   await sql
     .prepare("INSERT INTO events (id, campaign_id, recipient_id, type, url, created_at) VALUES (?, ?, ?, 'click', ?, ?)")
     .run(newId(), row.campaign_id, row.id, url.slice(0, 2000), now);
+  // Automations can be set to stop a person's series as soon as they click any link in it.
+  const stopped = await sql
+    .prepare(
+      `UPDATE automation_enrollments SET status = 'stopped', stop_reason = 'clicked a link', updated_at = ?
+       WHERE status = 'active'
+         AND id IN (SELECT enrollment_id FROM automation_sends WHERE recipient_id = ?)
+         AND automation_id IN (SELECT automation_id FROM automation_settings WHERE exit_on_click = 1)`,
+    )
+    .run(now, row.id);
+  if (stopped > 0) await skipQueuedForStoppedEnrollments();
+}
+
+/** Anything still waiting to be delivered for an enrollment that has since been stopped is skipped. */
+export async function skipQueuedForStoppedEnrollments(): Promise<number> {
+  const sql = await readySql();
+  return sql
+    .prepare(
+      `UPDATE recipients SET status = 'skipped', error = 'Left the automation', claimed_at = NULL
+       WHERE status = 'pending'
+         AND id IN (
+           SELECT s.recipient_id FROM automation_sends s
+           JOIN automation_enrollments e ON e.id = s.enrollment_id
+           WHERE e.status = 'stopped' AND e.stop_reason != 'unsubscribed'
+         )`,
+    )
+    .run();
 }
 
 export type UnsubView = {
