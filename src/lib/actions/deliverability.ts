@@ -6,6 +6,7 @@ import {
   clearWebhookToken,
   removeSuppression,
   rotateWebhookToken,
+  saveDkimSelector,
 } from "../deliverability";
 import { requireUser } from "../session";
 import { UserError } from "../user-error";
@@ -37,6 +38,17 @@ export async function removeSuppressionAction(formData: FormData): Promise<void>
     throw error;
   }
   redirect(withMessage("/app/suppressions", "notice", "Removed. That address can be mailed again."));
+}
+
+export async function checkSenderAction(formData: FormData): Promise<void> {
+  const user = await requireUser();
+  try {
+    await saveDkimSelector(user.id, String(formData.get("selector") || ""));
+  } catch (error) {
+    if (error instanceof UserError) redirect(withMessage("/app/settings#sender", "error", error.message));
+    throw error;
+  }
+  redirect("/app/settings?check=1#sender");
 }
 
 export async function rotateWebhookTokenAction(): Promise<void> {

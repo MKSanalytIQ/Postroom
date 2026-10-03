@@ -1,9 +1,10 @@
 import type { Metadata } from "next";
-import { ConfirmSubmit, Flash, PageHeader, SubmitButton } from "@/components/ui";
+import { ConfirmSubmit, Flash, PageHeader, Pill, SubmitButton } from "@/components/ui";
 import { deleteAccountAction } from "@/lib/actions/auth";
-import { clearWebhookTokenAction, rotateWebhookTokenAction } from "@/lib/actions/deliverability";
+import { checkSenderAction, clearWebhookTokenAction, rotateWebhookTokenAction } from "@/lib/actions/deliverability";
 import { saveSettingsAction, testSmtpAction } from "@/lib/actions/settings";
 import { getDeliverabilitySettings } from "@/lib/deliverability";
+import { checkSender } from "@/lib/dns-check";
 import { requestOrigin } from "@/lib/origin";
 import { requireUser } from "@/lib/session";
 
@@ -12,11 +13,13 @@ export const metadata: Metadata = { title: "Settings" };
 export default async function SettingsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ error?: string; notice?: string }>;
+  searchParams: Promise<{ error?: string; notice?: string; check?: string }>;
 }) {
   const user = await requireUser();
   const params = await searchParams;
-  const { webhookToken } = await getDeliverabilitySettings(user.id);
+  const { webhookToken, dkimSelector } = await getDeliverabilitySettings(user.id);
+  const senderAddress = user.fromEmail || user.email;
+  const sender = params.check ? await checkSender(senderAddress, dkimSelector) : null;
   const webhookUrl = webhookToken ? `${await requestOrigin()}/api/webhooks/deliverability?token=${webhookToken}` : "";
   return (
     <div className="stack" style={{ maxWidth: 720 }}>
@@ -91,6 +94,50 @@ export default async function SettingsPage({
           </SubmitButton>
         </div>
       </form>
+      <section id="sender" className="panel stack">
+        <h2>Sender verification</h2>
+        <p className="fine">
+          Mailbox providers trust mail more when the domain of your from address (<strong>{senderAddress}</strong>) publishes SPF,
+          DKIM, and DMARC records. This looks them up in DNS. Missing records do not stop you sending, but mail is more likely to
+          land in spam.
+        </p>
+        <form action={checkSenderAction} className="inline-form">
+          <label className="field" style={{ maxWidth: 260 }}>
+            <span>DKIM selector</span>
+            <input name="selector" defaultValue={dkimSelector} placeholder="default" />
+          </label>
+          <SubmitButton className="btn btn-ghost" pendingLabel="Checking…">
+            Check DNS
+          </SubmitButton>
+        </form>
+        {params.check && !sender ? <p className="banner bad">Add a valid from email above, save, and check again.</p> : null}
+        {sender
+          ? (
+              [
+                ["SPF", sender.spf],
+                ["DKIM", sender.dkim],
+                ["DMARC", sender.dmarc],
+              ] as const
+            ).map(([label, result]) => (
+              <div key={label} className="stack" style={{ gap: 4 }}>
+                <p>
+                  <strong>{label}</strong> <Pill status={result.status} />
+                </p>
+                <p className="fine">{result.message}</p>
+                {result.record ? (
+                  <p className="fine" style={{ wordBreak: "break-all", fontFamily: "ui-monospace, monospace" }}>
+                    {result.record}
+                  </p>
+                ) : null}
+              </div>
+            ))
+          : null}
+        {sender ? (
+          <p className="fine">
+            DNS changes can take a while to spread. Checked {sender.domain} with selector &quot;{sender.selector}&quot;.
+          </p>
+        ) : null}
+      </section>
       <section id="bounces" className="panel stack">
         <h2>Bounces and complaints</h2>
         <p className="fine">

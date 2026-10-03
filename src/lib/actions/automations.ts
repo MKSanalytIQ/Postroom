@@ -13,6 +13,8 @@ import {
   saveRules,
   updateAutomation,
 } from "../automations";
+import { getDeliverabilitySettings } from "../deliverability";
+import { senderWarnings } from "../dns-check";
 import { requestOrigin } from "../origin";
 import { requireUser } from "../session";
 import { UserError } from "../user-error";
@@ -90,9 +92,17 @@ export async function moveStepAction(formData: FormData): Promise<void> {
 
 export async function activateAutomationAction(formData: FormData): Promise<void> {
   const origin = await requestOrigin();
-  await editAutomation(formData, "Automation is active. People who join the list from now on will be enrolled.", (userId, id) =>
-    activateAutomation(userId, id, origin),
-  );
+  const user = await requireUser();
+  // Non-blocking: the automation is activated either way, the notice just mentions missing DNS records.
+  const warnings = await senderWarnings({
+    fromEmail: user.fromEmail || user.email,
+    selector: (await getDeliverabilitySettings(user.id)).dkimSelector,
+    smtpConfigured: user.smtpConfigured,
+  });
+  const notice = `Automation is active. People who join the list from now on will be enrolled.${
+    warnings.length ? ` Heads-up: ${warnings.join("; ")}, so mail may land in spam. See sender verification in Settings.` : ""
+  }`;
+  await editAutomation(formData, notice, (userId, id) => activateAutomation(userId, id, origin));
 }
 
 export async function pauseAutomationAction(formData: FormData): Promise<void> {
