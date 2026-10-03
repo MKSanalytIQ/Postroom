@@ -622,6 +622,7 @@ export async function enrollNewMembers(limit = 200): Promise<number> {
         `SELECT c.id, lc.created_at AS joined_at FROM list_contacts lc
          JOIN contacts c ON c.id = lc.contact_id
          WHERE lc.list_id = ? AND lc.created_at >= ? AND c.status = 'subscribed'
+           AND NOT EXISTS (SELECT 1 FROM suppressed_addresses sa WHERE sa.user_id = c.user_id AND sa.email = c.email)
            AND NOT EXISTS (
              SELECT 1 FROM automation_enrollments e WHERE e.automation_id = ? AND e.contact_id = c.id
            )
@@ -712,6 +713,13 @@ export async function advanceEnrollment(enrollmentId: string, expectedStep: numb
       | null;
     if (!step) {
       await finish(tx, enrollmentId, "completed", "", now);
+      return true;
+    }
+    const suppressed = await tx
+      .prepare("SELECT 1 AS found FROM suppressed_addresses sa JOIN contacts c ON c.user_id = sa.user_id AND c.email = sa.email WHERE c.id = ?")
+      .get(row.contact_id);
+    if (suppressed) {
+      await finish(tx, enrollmentId, "stopped", "suppressed", now);
       return true;
     }
     let nextRun = now;

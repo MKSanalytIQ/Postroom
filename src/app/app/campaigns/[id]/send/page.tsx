@@ -3,6 +3,8 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { Flash, SubmitButton } from "@/components/ui";
 import { queueCampaignAction } from "@/lib/actions/campaigns";
+import { getDeliverabilitySettings } from "@/lib/deliverability";
+import { senderWarnings } from "@/lib/dns-check";
 import { getAccount, getCampaign, subscribedCount } from "@/lib/queries";
 import { requireUser } from "@/lib/session";
 import { sendBlockers } from "@/lib/validators";
@@ -23,6 +25,14 @@ export default async function SendCampaignPage({
   if (!campaign) notFound();
   const account = await getAccount(user.id);
   const subscribed = await subscribedCount(user.id, campaign.listId);
+  const warnings =
+    campaign.status === "draft"
+      ? await senderWarnings({
+          fromEmail: campaign.fromEmail,
+          selector: (await getDeliverabilitySettings(user.id)).dkimSelector,
+          smtpConfigured: account.smtpConfigured,
+        })
+      : [];
   const blockers =
     campaign.status === "draft"
       ? sendBlockers({
@@ -57,6 +67,14 @@ export default async function SendCampaignPage({
           No SMTP host is saved, so this send is stored locally instead of delivered. Add a host in{" "}
           <Link href="/app/settings">Settings</Link> if that is not what you want.
         </p>
+      ) : null}
+      {warnings.length > 0 ? (
+        <div className="banner warn">
+          <p>
+            <strong>Heads-up, this will not stop the send:</strong> {warnings.join("; ")}. Mail from a domain without these records
+            is more likely to be marked as spam. See <Link href="/app/settings#sender">sender verification in Settings</Link>.
+          </p>
+        </div>
       ) : null}
       {blockers.length > 0 ? (
         <div className="banner bad">

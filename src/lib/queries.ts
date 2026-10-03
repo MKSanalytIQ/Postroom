@@ -31,6 +31,9 @@ import { isEmail, normalizeEmail, sendBlockers } from "./validators";
 
 const PAGE_SIZE = 50;
 
+/** SQL condition: contact `c` is not on the account's suppression list (hard bounce, complaint, or manual). */
+const NOT_SUPPRESSED = `NOT EXISTS (SELECT 1 FROM suppressed_addresses sa WHERE sa.user_id = c.user_id AND sa.email = c.email)`;
+
 function listNamesAgg(sql: Sql): string {
   return sql.dialect === "postgres" ? "string_agg(l.name, ', ')" : "GROUP_CONCAT(l.name, ', ')";
 }
@@ -433,6 +436,9 @@ export async function addContact(
   if (!isEmail(email)) throw new UserError("Enter a valid email.");
   if (input.listId && !(await getList(userId, input.listId))) throw new UserError("List not found.");
   const sql = await readySql();
+  if (await sql.prepare("SELECT 1 AS found FROM suppressed_addresses WHERE user_id = ? AND email = ?").get(userId, email)) {
+    throw new UserError("That address is on your suppression list, so it cannot be added. Remove it from Suppressions first if that is a mistake.");
+  }
   const existing = (await sql
     .prepare("SELECT id, status FROM contacts WHERE user_id = ? AND email = ?")
     .get(userId, email)) as { id: string; status: string } | null;
@@ -518,12 +524,22 @@ export async function importContacts(userId: string, listId: string | null, csv:
   let updated = 0;
   let addedToList = 0;
   let keptUnsubscribed = 0;
+  let suppressed = 0;
+  const blocked = new Set(
+    ((await sql.prepare("SELECT email FROM suppressed_addresses WHERE user_id = ?").all(userId)) as { email: string }[]).map(
+      (row) => row.email,
+    ),
+  );
   await sql.transaction(async (tx) => {
     const find = tx.prepare("SELECT id, status FROM contacts WHERE user_id = ? AND email = ?");
     const insert = tx.prepare(INSERT_CONTACT);
     const update = tx.prepare(UPDATE_CONTACT_NAMES);
     const link = tx.prepare(LINK_CONTACT);
     for (const contact of parsed.contacts) {
+      if (blocked.has(contact.email)) {
+        suppressed += 1;
+        continue;
+      }
       const existing = (await find.get(userId, contact.email)) as { id: string; status: string } | null;
       let id: string;
       if (!existing) {
@@ -547,6 +563,7 @@ export async function importContacts(userId: string, listId: string | null, csv:
     addedToList,
     invalid: parsed.invalid,
     keptUnsubscribed,
+    suppressed,
   };
 }
 
@@ -768,7 +785,7 @@ export async function subscribedCount(userId: string, listId: string | null): Pr
       `SELECT COUNT(*) AS n FROM list_contacts lc
        JOIN contacts c ON c.id = lc.contact_id
        JOIN lists l ON l.id = lc.list_id
-       WHERE lc.list_id = ? AND l.user_id = ? AND c.status = 'subscribed'`,
+       WHERE lc.list_id = ? AND l.user_id = ? AND c.status = 'subscribed' AND ${NOT_SUPPRESSED}`,
     )
     .get(listId, userId)) as CountRow;
   return Number(row.n);
@@ -799,7 +816,7 @@ export async function queueCampaign(userId: string, campaignId: string, origin: 
       `SELECT c.id, c.email, c.first_name, c.last_name, c.unsub_token
        FROM contacts c
        JOIN list_contacts lc ON lc.contact_id = c.id
-       WHERE lc.list_id = ? AND c.user_id = ? AND c.status = 'subscribed'`,
+       WHERE lc.list_id = ? AND c.user_id = ? AND c.status = 'subscribed' AND ${NOT_SUPPRESSED}`,
     )
     .all(listId, userId)) as {
     id: string;
@@ -1025,7 +1042,7 @@ export async function claimBatch(limit: number): Promise<SendJob[]> {
   });
 }
 
-export async function markRecipient(id: string, status: "sent" | "failed" | "skipped" | "pending", error: string): Promise<void> {
+export async function markRecipient(id: string, status: "sent" | "failed" | "skipped" | "pending" | "bounced", error: string): Promise<void> {
   const sentAt = status === "sent" ? nowIso() : null;
   const sql = await readySql();
   await sql

@@ -1,7 +1,11 @@
 import type { Metadata } from "next";
-import { ConfirmSubmit, Flash, PageHeader, SubmitButton } from "@/components/ui";
+import { ConfirmSubmit, Flash, PageHeader, Pill, SubmitButton } from "@/components/ui";
 import { deleteAccountAction } from "@/lib/actions/auth";
+import { checkSenderAction, clearWebhookTokenAction, rotateWebhookTokenAction } from "@/lib/actions/deliverability";
 import { saveSettingsAction, testSmtpAction } from "@/lib/actions/settings";
+import { getDeliverabilitySettings } from "@/lib/deliverability";
+import { checkSender } from "@/lib/dns-check";
+import { requestOrigin } from "@/lib/origin";
 import { requireUser } from "@/lib/session";
 
 export const metadata: Metadata = { title: "Settings" };
@@ -9,10 +13,14 @@ export const metadata: Metadata = { title: "Settings" };
 export default async function SettingsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ error?: string; notice?: string }>;
+  searchParams: Promise<{ error?: string; notice?: string; check?: string }>;
 }) {
   const user = await requireUser();
   const params = await searchParams;
+  const { webhookToken, dkimSelector } = await getDeliverabilitySettings(user.id);
+  const senderAddress = user.fromEmail || user.email;
+  const sender = params.check ? await checkSender(senderAddress, dkimSelector) : null;
+  const webhookUrl = webhookToken ? `${await requestOrigin()}/api/webhooks/deliverability?token=${webhookToken}` : "";
   return (
     <div className="stack" style={{ maxWidth: 720 }}>
       <PageHeader
@@ -86,6 +94,85 @@ export default async function SettingsPage({
           </SubmitButton>
         </div>
       </form>
+      <section id="sender" className="panel stack">
+        <h2>Sender verification</h2>
+        <p className="fine">
+          Mailbox providers trust mail more when the domain of your from address (<strong>{senderAddress}</strong>) publishes SPF,
+          DKIM, and DMARC records. This looks them up in DNS. Missing records do not stop you sending, but mail is more likely to
+          land in spam.
+        </p>
+        <form action={checkSenderAction} className="inline-form">
+          <label className="field" style={{ maxWidth: 260 }}>
+            <span>DKIM selector</span>
+            <input name="selector" defaultValue={dkimSelector} placeholder="default" />
+          </label>
+          <SubmitButton className="btn btn-ghost" pendingLabel="Checking…">
+            Check DNS
+          </SubmitButton>
+        </form>
+        {params.check && !sender ? <p className="banner bad">Add a valid from email above, save, and check again.</p> : null}
+        {sender
+          ? (
+              [
+                ["SPF", sender.spf],
+                ["DKIM", sender.dkim],
+                ["DMARC", sender.dmarc],
+              ] as const
+            ).map(([label, result]) => (
+              <div key={label} className="stack" style={{ gap: 4 }}>
+                <p>
+                  <strong>{label}</strong> <Pill status={result.status} />
+                </p>
+                <p className="fine">{result.message}</p>
+                {result.record ? (
+                  <p className="fine" style={{ wordBreak: "break-all", fontFamily: "ui-monospace, monospace" }}>
+                    {result.record}
+                  </p>
+                ) : null}
+              </div>
+            ))
+          : null}
+        {sender ? (
+          <p className="fine">
+            DNS changes can take a while to spread. Checked {sender.domain} with selector &quot;{sender.selector}&quot;.
+          </p>
+        ) : null}
+      </section>
+      <section id="bounces" className="panel stack">
+        <h2>Bounces and complaints</h2>
+        <p className="fine">
+          Hard bounces seen while sending are suppressed automatically. To also catch bounces and spam complaints that arrive
+          later, point your provider at the webhook below. Anyone with this URL can add to your suppression list, so keep it
+          private.
+        </p>
+        {webhookToken ? (
+          <>
+            <label className="field">
+              <span>Webhook URL</span>
+              <input readOnly value={webhookUrl} aria-label="Webhook URL" />
+            </label>
+            <p className="fine">
+              Amazon SES: create an SNS topic for bounce and complaint notifications and add an HTTPS subscription with this URL.
+              Postroom confirms the subscription for you. Other providers can POST JSON such as{" "}
+              <code>{`{"type":"bounce","email":"a@example.com"}`}</code> (types: bounce, complaint, delivery; add{" "}
+              <code>{`"permanent":false`}</code> for a soft bounce). Tools that can set headers may send{" "}
+              <code>Authorization: Bearer &lt;token&gt;</code> instead of using the query string.
+            </p>
+            <div className="action-row">
+              <form action={rotateWebhookTokenAction}>
+                <SubmitButton className="btn btn-ghost">Make a new token</SubmitButton>
+              </form>
+              <form action={clearWebhookTokenAction}>
+                <ConfirmSubmit label="Turn off" message="Turn the webhook off? Bounce reports will stop being accepted." />
+              </form>
+            </div>
+          </>
+        ) : (
+          <form action={rotateWebhookTokenAction}>
+            <SubmitButton>Create webhook URL</SubmitButton>
+          </form>
+        )}
+      </section>
       <form action={deleteAccountAction} className="danger-zone">
         <h2>Delete account</h2>
         <p className="fine">This removes your lists, contacts, templates, and campaigns from this Postroom database.</p>

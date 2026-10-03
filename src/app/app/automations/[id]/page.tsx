@@ -24,6 +24,8 @@ import {
   recentEnrollments,
   stepStats,
 } from "@/lib/automations";
+import { getDeliverabilitySettings } from "@/lib/deliverability";
+import { senderWarnings } from "@/lib/dns-check";
 import { listLists, listTemplates } from "@/lib/queries";
 import { timeZoneOptions, WEEKDAYS } from "@/lib/send-window";
 import { requireUser } from "@/lib/session";
@@ -56,6 +58,13 @@ export default async function AutomationPage({
   const zones = timeZoneOptions();
   if (!zones.includes(rules.timezone)) zones.push(rules.timezone);
   const active = automation.status === "active";
+  const warnings = active
+    ? []
+    : await senderWarnings({
+        fromEmail: user.fromEmail || user.email,
+        selector: (await getDeliverabilitySettings(user.id)).dkimSelector,
+        smtpConfigured: user.smtpConfigured,
+      });
   return (
     <div className="stack">
       <RefreshWhileSending active={active} />
@@ -68,6 +77,9 @@ export default async function AutomationPage({
           </p>
         </div>
         <div className="action-row">
+          <Link className="btn btn-ghost" href={`/app/automations/${automation.id}/report`}>
+            Report
+          </Link>
           {active ? (
             <form action={pauseAutomationAction}>
               <input type="hidden" name="id" value={automation.id} />
@@ -88,6 +100,12 @@ export default async function AutomationPage({
         <p className="banner warn">
           Capture mode is on. Automation emails are stored in Postroom and not delivered until SMTP is set in{" "}
           <Link href="/app/settings">Settings</Link>.
+        </p>
+      ) : null}
+      {warnings.length > 0 ? (
+        <p className="banner warn">
+          Before you activate: {warnings.join("; ")}. This will not stop the automation, but mail may land in spam. See{" "}
+          <Link href="/app/settings#sender">sender verification in Settings</Link>.
         </p>
       ) : null}
       {active ? (
