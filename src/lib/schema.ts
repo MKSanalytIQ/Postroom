@@ -171,6 +171,20 @@ CREATE TABLE IF NOT EXISTS automation_sends (
   PRIMARY KEY (enrollment_id, step_id)
 );
 
+-- Optional automation rules, one row per automation. No row means the defaults: no exit conditions and no send window.
+-- Kept in its own table so existing databases only need this CREATE TABLE IF NOT EXISTS, never an ALTER.
+CREATE TABLE IF NOT EXISTS automation_settings (
+  automation_id TEXT PRIMARY KEY REFERENCES automations(id) ON DELETE CASCADE,
+  exit_on_click INTEGER NOT NULL DEFAULT 0,
+  exit_list_id TEXT REFERENCES lists(id) ON DELETE SET NULL,
+  window_enabled INTEGER NOT NULL DEFAULT 0,
+  window_days TEXT NOT NULL DEFAULT '0,1,2,3,4,5,6',
+  window_start_hour INTEGER NOT NULL DEFAULT 0,
+  window_end_hour INTEGER NOT NULL DEFAULT 24,
+  timezone TEXT NOT NULL DEFAULT 'UTC',
+  updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_lists_user ON lists(user_id);
 CREATE INDEX IF NOT EXISTS idx_contacts_user ON contacts(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_recipients_status ON recipients(campaign_id, status);
