@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { classifyDeliveryError, isSnsSubscribeUrl, parseWebhookPayload } from "./bounces";
+import { classifyDeliveryError, findSnsEnvelopes, isSnsSubscribeUrl, parseWebhookPayload } from "./bounces";
 
 function sns(message: unknown) {
   return { Type: "Notification", MessageId: "1", Message: JSON.stringify(message) };
@@ -109,4 +109,24 @@ test("only a permanent refusal of the recipient counts as a hard bounce", () => 
   assert.equal(classifyDeliveryError(Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNECTION" })).kind, "other");
   assert.equal(classifyDeliveryError("weird").kind, "other");
   assert.equal(classifyDeliveryError(null).message, "Send failed");
+});
+
+test("only SNS envelopes in the verified set are trusted, and the finder sees the same places the parser does", () => {
+  const trusted = sns({ notificationType: "Delivery", delivery: { recipients: ["a@example.com"] } });
+  const forged = sns({ notificationType: "Complaint", complaint: { complainedRecipients: [{ emailAddress: "b@example.com" }] } });
+  const body = { events: [trusted, { type: "bounce", email: "c@example.com" }, forged] };
+  assert.deepEqual(findSnsEnvelopes(body), [trusted, forged]);
+  assert.deepEqual(findSnsEnvelopes([trusted, { notificationType: "Bounce" }, "text", null]), [trusted]);
+  assert.deepEqual(findSnsEnvelopes({ type: "bounce", email: "c@example.com" }), []);
+
+  const parsed = parseWebhookPayload(body, { verifiedSns: new Set<object>([trusted]) });
+  assert.deepEqual(parsed.events.map((event) => `${event.kind}:${event.email}`), ["delivery:a@example.com", "bounce:c@example.com"]);
+  assert.equal(parsed.unverified, 1);
+  assert.equal(parseWebhookPayload(body).unverified, 0, "without a verified set the parser trusts everything (pure parsing)");
+
+  const nested = parseWebhookPayload(sns({ Type: "SubscriptionConfirmation", SubscribeURL: "https://sns.us-east-1.amazonaws.com/?Action=ConfirmSubscription" }), {
+    verifiedSns: new Set<object>(),
+  });
+  assert.equal(nested.confirmUrl, null);
+  assert.equal(nested.unverified, 1);
 });
