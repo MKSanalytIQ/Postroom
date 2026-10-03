@@ -47,6 +47,15 @@ How it behaves:
 - Steps can only be changed while the automation is paused or still a draft. Pausing also stops new enrollments, so people who join the list while it is paused are not added when you resume. Resuming only enrolls people who join from then on.
 - A template that an automation uses cannot be deleted until the step is removed. An email step uses the template as it is at the moment the step runs.
 
+Rules, set in the Rules panel on the automation page (they can be changed while it runs):
+
+- **Stop when someone clicks a link**: the first click on any link in the series ends that person's series. Some mail systems scan links automatically, and such a scan counts as a click.
+- **Stop when someone joins another list**: for example a Customers list. It applies to people who join that list after they were enrolled; people already on it when they joined the trigger list carry on. Emails already queued for a stopped person are skipped.
+- **Send window**: pick the days of the week, a start and end hour (the end hour is exclusive, so 09:00 to 17:00 sends up to 16:59), and a timezone (UTC by default). An email that comes due outside the window waits for the next opening. Waits are not shifted. A window cannot run past midnight, so the end hour must be later than the start hour.
+- **Per-step stats**: each email step shows how many were sent, opened and clicked (unique people, with the share of sent), plus any still waiting or failed. Opens rely on the tracking pixel, so they undercount where images are blocked.
+
+Rules live in their own table (`automation_settings`), created automatically on first start, so existing databases upgrade without any manual step. An automation with no rules row behaves exactly as before.
+
 The send worker (`npm run worker`, started by `npm run dev`) moves automations forward as well as sending queued mail, so it must be running. A step is claimed in a single database transaction, so running two workers at once does not send anything twice.
 
 ## SMTP
