@@ -12,6 +12,10 @@ Until SMTP is configured, Postroom runs in capture mode: each letter is stored o
 - Open tracking, signed click tracking, and one-click unsubscribe
 - Company name and postal address on every letter
 - Automations: drip campaigns and welcome series that start when someone joins a list
+- Suppression list: hard bounces, spam complaints, and manual entries are never mailed again
+- A token-protected webhook for bounce and complaint events (Amazon SES through SNS, or a plain JSON format)
+- Sender verification: SPF, DKIM, and DMARC checks for your From domain
+- Campaign and automation reports with a per-day chart, top links, and CSV export
 
 SMS, a drag-and-drop builder, and a shared sending IP are not part of this version.
 
@@ -57,6 +61,73 @@ Rules, set in the Rules panel on the automation page (they can be changed while 
 Rules live in their own table (`automation_settings`), created automatically on first start, so existing databases upgrade without any manual step. An automation with no rules row behaves exactly as before.
 
 The send worker (`npm run worker`, started by `npm run dev`) moves automations forward as well as sending queued mail, so it must be running. A step is claimed in a single database transaction, so running two workers at once does not send anything twice.
+
+## Deliverability
+
+### Suppressions
+
+Open **Suppressions** in the sidebar. Every account has its own list of addresses that must not be mailed, each with a reason: `hard bounce`, `complaint`, or `manual`. You can add addresses by hand (one or many), remove one, search, and download the list as CSV.
+
+- Campaigns and automations never send to a suppressed address. They are left out when a campaign is queued, skipped again at send time if they were suppressed after queueing (the recipient shows "Suppressed"), and automations stop an enrollment for that address.
+- CSV import skips suppressed addresses and says how many it skipped. Adding a single contact by hand with a suppressed address is refused too.
+- A complaint also unsubscribes the contact. Removing an address from the list does not resubscribe anyone.
+- The first reason stays: an address that is already listed keeps its original reason.
+
+### Hard bounces from the send worker
+
+When the SMTP server refuses a recipient permanently during sending, the recipient is marked `bounced`, a bounce event is recorded, and the address is suppressed. This only happens for a clear permanent (5xx) refusal of the recipient: an enhanced status such as 5.1.x (bad mailbox or domain), 5.2.1, or 5.4.1, or a refused `RCPT TO` with code 550, 551, or 553. Temporary (4xx) errors, connection problems, authentication failures, and policy, spam, relay, or "sender not verified" refusals are not treated as bounces; those recipients fail as before and can be retried.
+
+### Bounce and complaint webhook
+
+Most bounces and complaints arrive later, from your sending provider. In **Settings, Bounces and complaints**, generate a token. The page shows the endpoint:
+
+```
+POST https://your-host/api/webhooks/deliverability
+Authorization: Bearer <token>
+```
+
+Providers that cannot set a header can use `?token=<token>` on the URL instead. Regenerating the token invalidates the old one, and turning it off makes the endpoint answer 401. Bodies are limited to 1 MB.
+
+**Amazon SES.** Send SES bounce, complaint, and delivery notifications (or an SES event destination) to an SNS topic, then add an HTTPS subscription pointing at the URL above with the token in `?token=`. Postroom confirms the subscription automatically; only `https://sns.<region>.amazonaws.com` confirmation URLs are followed. Permanent bounces are suppressed; transient (soft) bounces are recorded but not suppressed. Complaints are suppressed and unsubscribe the contact. Delivery events mark mail as delivered in reports.
+
+**Generic JSON.** Post one object, an array, or `{"events": [...]}`:
+
+```json
+{ "type": "bounce", "email": "someone@example.com", "permanent": true, "reason": "mailbox full" }
+{ "type": "complaint", "email": "someone@example.com" }
+{ "type": "delivery", "email": "someone@example.com" }
+```
+
+`type` is one of `bounce`, `hard_bounce`, `soft_bounce`, `complaint` (or `spam`), and `delivery` (or `delivered`). A plain `bounce` counts as permanent unless `"permanent": false` is given.
+
+Events are matched to the most recent message sent to that address and counted once per message and type. There is no message-id correlation, so an event for an address you never mailed is still suppressed but does not show in any report.
+
+### Sender verification
+
+In **Settings, Sender verification**, enter your DKIM selector (default `default`; your provider tells you the real one, for example `s1` or `selector1`) and press Check. Postroom looks up DNS for the domain of your From email with Node's resolver:
+
+- **SPF**: a TXT record starting `v=spf1`, and whether it ends in a strict or permissive default.
+- **DKIM**: a TXT record at `<selector>._domainkey.<domain>` containing a public key (`p=`).
+- **DMARC**: a TXT record at `_dmarc.<domain>`, looking at the policy (`none` is a warning; `quarantine` or `reject` pass). If the domain has none, the organisation's parent domains are tried, but never the top-level domain.
+
+Each shows pass, warn, or missing, with plain-language guidance. The campaign review page and the automation page (before you activate it) show a short warning when something is missing. It never blocks sending or activating. Warnings are skipped in capture mode, and results are cached for five minutes per process. Lookups have a 4 second timeout, and a lookup failure shows as a warning rather than a failure.
+
+### Reports
+
+Open **Full report** on a sent campaign, or **Report** on an automation (it covers every email in the series together; step-by-step numbers remain on the automation page). A report shows:
+
+- sent, delivered (shown as a dash unless your provider reports deliveries to the webhook), opens, clicks, bounces, complaints, and unsubscribes, with rates
+- a per-day line chart (sent, opened, clicked, bounced) drawn as inline SVG, with no chart library
+- the ten most clicked links, with total clicks and distinct people
+- CSV downloads: summary, by day, links, and one row per recipient
+
+Open, click, complaint, and unsubscribe rates are shares of sent messages. The bounce rate is a share of messages tried (sent plus refused at send time). Opens and clicks in the chart are distinct people on the day of their first one, and days are UTC (the most recent 90 are shown).
+
+Limits to know about: bounces that arrive by webhook are counted as bounce events and suppress the address, but the recipient's own status stays `sent`; only refusals during sending set it to `bounced`. Opens are an estimate, because mail apps preload images.
+
+### Storage and security notes
+
+Three tables are added, all created automatically on first start so existing databases need no manual step: `suppressed_addresses`, `deliverability_settings` (webhook token and DKIM selector), and an index on `events(recipient_id, type)`. Nothing existing is altered. The webhook token is stored as plain text and is the only authentication for the endpoint; SNS message signatures are not verified. Treat the URL as a secret, use HTTPS, and regenerate the token if it leaks.
 
 ## SMTP
 
