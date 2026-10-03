@@ -33,7 +33,7 @@ export function Pill({ status }: { status: string }) {
   const tone =
     status === "sent" || status === "subscribed" || status === "active" || status === "completed"
       ? "good"
-      : status === "failed" || status === "unsubscribed"
+      : status === "failed" || status === "unsubscribed" || status === "bounced"
         ? "bad"
         : status === "sending" || status === "paused" || status === "stopped"
           ? "warn"

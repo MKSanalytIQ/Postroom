@@ -109,6 +109,8 @@ export type ImportResult = {
   addedToList: number;
   invalid: number;
   keptUnsubscribed: number;
+  /** Rows skipped because the address is on the suppression list. */
+  suppressed: number;
 };
 
 export type Dashboard = {
@@ -222,4 +224,15 @@ export type StepStats = {
   waiting: number;
   uniqueOpens: number;
   uniqueClicks: number;
+};
+
+export type SuppressionReason = "hard_bounce" | "complaint" | "manual";
+
+export type Suppression = {
+  id: string;
+  email: string;
+  reason: SuppressionReason;
+  source: string;
+  detail: string;
+  createdAt: string;
 };

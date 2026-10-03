@@ -9,6 +9,7 @@ const LINKS = [
   ["/app", "Overview"],
   ["/app/lists", "Lists"],
   ["/app/contacts", "Contacts"],
+  ["/app/suppressions", "Suppressions"],
   ["/app/templates", "Templates"],
   ["/app/campaigns", "Campaigns"],
   ["/app/automations", "Automations"],

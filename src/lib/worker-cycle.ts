@@ -1,6 +1,8 @@
 import { signClick } from "./crypto";
 import { composeEmail, formatAddress } from "./render";
+import { classifyDeliveryError } from "./bounces";
 import { runAutomationCycle } from "./automations";
+import { recordHardBounce, REASON_LABELS, suppressionReason } from "./deliverability";
 import {
   campaignIsSending,
   claimBatch,
@@ -31,6 +33,13 @@ async function processJob(job: SendJob): Promise<void> {
   }
   if (job.contactStatus !== "subscribed") {
     await markRecipient(job.recipientId, "skipped", job.contactStatus === "unsubscribed" ? "Unsubscribed" : "Contact removed");
+    return;
+  }
+  // Last line of defence: suppression is checked again at send time, so anything queued before an
+  // address bounced, complained, or was added by hand is still held back.
+  const suppressed = await suppressionReason(job.userId, job.email);
+  if (suppressed) {
+    await markRecipient(job.recipientId, "skipped", `Suppressed (${REASON_LABELS[suppressed].toLowerCase()})`);
     return;
   }
   const account = await getAccount(job.userId);
@@ -88,6 +97,18 @@ async function processJob(job: SendJob): Promise<void> {
       console.log(`${account.smtpConfigured ? "smtp" : "capture"} ${job.email}`);
     }
   } catch (error) {
+    const failure = classifyDeliveryError(error);
+    if (failure.kind === "hard_bounce") {
+      await recordHardBounce({
+        recipientId: job.recipientId,
+        campaignId: job.campaignId,
+        userId: job.userId,
+        email: job.email,
+        message: failure.message,
+      });
+      if (process.env.POSTROOM_WORKER) console.log(`bounced ${job.email}: ${failure.message}`);
+      return;
+    }
     const message = error instanceof UserError || error instanceof Error ? error.message : "Send failed";
     await markRecipient(job.recipientId, "failed", message);
     if (process.env.POSTROOM_WORKER) console.log(`failed ${job.email}: ${message}`);

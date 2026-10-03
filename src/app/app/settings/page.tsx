@@ -1,7 +1,10 @@
 import type { Metadata } from "next";
 import { ConfirmSubmit, Flash, PageHeader, SubmitButton } from "@/components/ui";
 import { deleteAccountAction } from "@/lib/actions/auth";
+import { clearWebhookTokenAction, rotateWebhookTokenAction } from "@/lib/actions/deliverability";
 import { saveSettingsAction, testSmtpAction } from "@/lib/actions/settings";
+import { getDeliverabilitySettings } from "@/lib/deliverability";
+import { requestOrigin } from "@/lib/origin";
 import { requireUser } from "@/lib/session";
 
 export const metadata: Metadata = { title: "Settings" };
@@ -13,6 +16,8 @@ export default async function SettingsPage({
 }) {
   const user = await requireUser();
   const params = await searchParams;
+  const { webhookToken } = await getDeliverabilitySettings(user.id);
+  const webhookUrl = webhookToken ? `${await requestOrigin()}/api/webhooks/deliverability?token=${webhookToken}` : "";
   return (
     <div className="stack" style={{ maxWidth: 720 }}>
       <PageHeader
@@ -86,6 +91,41 @@ export default async function SettingsPage({
           </SubmitButton>
         </div>
       </form>
+      <section id="bounces" className="panel stack">
+        <h2>Bounces and complaints</h2>
+        <p className="fine">
+          Hard bounces seen while sending are suppressed automatically. To also catch bounces and spam complaints that arrive
+          later, point your provider at the webhook below. Anyone with this URL can add to your suppression list, so keep it
+          private.
+        </p>
+        {webhookToken ? (
+          <>
+            <label className="field">
+              <span>Webhook URL</span>
+              <input readOnly value={webhookUrl} aria-label="Webhook URL" />
+            </label>
+            <p className="fine">
+              Amazon SES: create an SNS topic for bounce and complaint notifications and add an HTTPS subscription with this URL.
+              Postroom confirms the subscription for you. Other providers can POST JSON such as{" "}
+              <code>{`{"type":"bounce","email":"a@example.com"}`}</code> (types: bounce, complaint, delivery; add{" "}
+              <code>{`"permanent":false`}</code> for a soft bounce). Tools that can set headers may send{" "}
+              <code>Authorization: Bearer &lt;token&gt;</code> instead of using the query string.
+            </p>
+            <div className="action-row">
+              <form action={rotateWebhookTokenAction}>
+                <SubmitButton className="btn btn-ghost">Make a new token</SubmitButton>
+              </form>
+              <form action={clearWebhookTokenAction}>
+                <ConfirmSubmit label="Turn off" message="Turn the webhook off? Bounce reports will stop being accepted." />
+              </form>
+            </div>
+          </>
+        ) : (
+          <form action={rotateWebhookTokenAction}>
+            <SubmitButton>Create webhook URL</SubmitButton>
+          </form>
+        )}
+      </section>
       <form action={deleteAccountAction} className="danger-zone">
         <h2>Delete account</h2>
         <p className="fine">This removes your lists, contacts, templates, and campaigns from this Postroom database.</p>

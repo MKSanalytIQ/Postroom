@@ -59,6 +59,7 @@ export async function importCsvAction(formData: FormData): Promise<void> {
       listId ? `${result.addedToList} added to the list` : "",
       result.invalid ? `${result.invalid} invalid rows skipped` : "",
       result.keptUnsubscribed ? `${result.keptUnsubscribed} stayed unsubscribed` : "",
+      result.suppressed ? `${result.suppressed} skipped because they are on the suppression list` : "",
     ].filter(Boolean);
     redirect(withMessage(back, "notice", `Import finished: ${parts.join(", ")}.`));
   } catch (error) {

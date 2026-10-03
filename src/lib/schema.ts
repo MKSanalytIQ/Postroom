@@ -185,6 +185,26 @@ CREATE TABLE IF NOT EXISTS automation_settings (
   updated_at TEXT NOT NULL
 );
 
+-- Addresses that must never be mailed again: hard bounces, spam complaints, and ones added by hand.
+CREATE TABLE IF NOT EXISTS suppressed_addresses (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  email TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'manual',
+  detail TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  UNIQUE(user_id, email)
+);
+
+-- Per-account deliverability settings in their own table, so existing databases need no ALTER.
+CREATE TABLE IF NOT EXISTS deliverability_settings (
+  user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  webhook_token TEXT UNIQUE,
+  dkim_selector TEXT NOT NULL DEFAULT 'default',
+  updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_lists_user ON lists(user_id);
 CREATE INDEX IF NOT EXISTS idx_contacts_user ON contacts(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_recipients_status ON recipients(campaign_id, status);
@@ -194,4 +214,6 @@ CREATE INDEX IF NOT EXISTS idx_automations_user ON automations(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_automation_steps_order ON automation_steps(automation_id, position);
 CREATE INDEX IF NOT EXISTS idx_enrollments_due ON automation_enrollments(status, next_run_at);
 CREATE INDEX IF NOT EXISTS idx_enrollments_contact ON automation_enrollments(contact_id);
+CREATE INDEX IF NOT EXISTS idx_suppressed_user ON suppressed_addresses(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_events_recipient ON events(recipient_id, type);
 `;
