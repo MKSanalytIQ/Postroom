@@ -79,16 +79,18 @@ When the SMTP server refuses a recipient permanently during sending, the recipie
 
 ### Bounce and complaint webhook
 
-Most bounces and complaints arrive later, from your sending provider. In **Settings, Bounces and complaints**, generate a token. The page shows the endpoint:
+Most bounces and complaints arrive later, from your sending provider. In **Settings, Bounces and complaints**, create a token. It is shown **once**, right after you create it, so copy it then. Postroom keeps only a SHA-256 hash, so a lost token cannot be recovered: make a new one (the old one stops working at once). Settings shows just the last four characters and when it was last used.
 
 ```
 POST https://your-host/api/webhooks/deliverability
 Authorization: Bearer <token>
 ```
 
-Providers that cannot set a header can use `?token=<token>` on the URL instead. Regenerating the token invalidates the old one, and turning it off makes the endpoint answer 401. Bodies are limited to 1 MB.
+Send the token in the `Authorization: Bearer` header wherever your sender allows it. `?token=<token>` on the URL also works, for senders that cannot set headers (Amazon SNS is one), but it is **less safe**: URLs are written to access logs, proxies, and monitoring tools, so a token in a URL leaks more easily. Turning the webhook off makes the endpoint answer 401.
 
-**Amazon SES.** Send SES bounce, complaint, and delivery notifications (or an SES event destination) to an SNS topic, then add an HTTPS subscription pointing at the URL above with the token in `?token=`. Postroom confirms the subscription automatically; only `https://sns.<region>.amazonaws.com` confirmation URLs are followed. Permanent bounces are suppressed; transient (soft) bounces are recorded but not suppressed. Complaints are suppressed and unsubscribe the contact. Delivery events mark mail as delivered in reports.
+Limits: bodies over 512 KB get 413, and each client address (from `X-Real-IP` or `X-Forwarded-For`) may make 300 requests a minute. After 10 failed authentications in a minute that address gets 429 with `Retry-After` until the minute is up, even with a correct token. These limits live in each server process's memory, so with several instances each keeps its own count.
+
+**Amazon SES.** Send SES bounce, complaint, and delivery notifications (or an SES event destination) to an SNS topic, then add an HTTPS subscription to the URL with the token in `?token=`. Postroom verifies the signature of every SNS message (SignatureVersion 1 and 2, using the canonical string to sign from the AWS documentation). The signing certificate must come from an `https://sns.<region>.amazonaws.com/...pem` URL, is fetched with a 5 second timeout, and is cached for an hour. A message with a missing, malformed, or wrong signature is rejected with 403 and nothing in it is applied; one bad message in a batch rejects the whole request. A subscription is only confirmed after its signature checks out, and only `https://sns.<region>.amazonaws.com` confirmation links are followed. Permanent bounces are suppressed; transient (soft) bounces are recorded but not suppressed. Complaints are suppressed and unsubscribe the contact. Delivery events mark mail as delivered in reports.
 
 **Generic JSON.** Post one object, an array, or `{"events": [...]}`:
 
@@ -98,7 +100,7 @@ Providers that cannot set a header can use `?token=<token>` on the URL instead. 
 { "type": "delivery", "email": "someone@example.com" }
 ```
 
-`type` is one of `bounce`, `hard_bounce`, `soft_bounce`, `complaint` (or `spam`), and `delivery` (or `delivered`). A plain `bounce` counts as permanent unless `"permanent": false` is given.
+`type` is one of `bounce`, `hard_bounce`, `soft_bounce`, `complaint` (or `spam`), and `delivery` (or `delivered`). A plain `bounce` counts as permanent unless `"permanent": false` is given. The generic format and raw SES notifications (not wrapped in SNS) rely on the token alone, since they carry no signature.
 
 Events are matched to the most recent message sent to that address and counted once per message and type. There is no message-id correlation, so an event for an address you never mailed is still suppressed but does not show in any report.
 
@@ -127,7 +129,9 @@ Limits to know about: bounces that arrive by webhook are counted as bounce event
 
 ### Storage and security notes
 
-Three tables are added, all created automatically on first start so existing databases need no manual step: `suppressed_addresses`, `deliverability_settings` (webhook token and DKIM selector), and an index on `events(recipient_id, type)`. Nothing existing is altered. The webhook token is stored as plain text and is the only authentication for the endpoint; SNS message signatures are not verified. Treat the URL as a secret, use HTTPS, and regenerate the token if it leaks.
+Four tables are added, all created automatically on first start so existing databases need no manual step: `suppressed_addresses`, `deliverability_settings` (DKIM selector), `webhook_tokens` (the token hash, last four characters, and last use), and an index on `events(recipient_id, type)`. Nothing existing is altered.
+
+Webhook tokens are 192 random bits and are stored only as a SHA-256 hash, looked up by hash and compared in constant time. If you upgraded from a version that stored the token as plain text (`deliverability_settings.webhook_token`), the first webhook request or Settings visit after the upgrade hashes it into `webhook_tokens` and erases the plaintext. The URL you already gave your provider keeps working. The token is still the only authentication for non-SNS senders, so use HTTPS, prefer the Bearer header, and make a new token if one leaks. Database backups taken before the upgrade still contain the old plaintext token.
 
 ## SMTP
 
