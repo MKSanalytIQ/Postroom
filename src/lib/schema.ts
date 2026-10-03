@@ -214,6 +214,17 @@ CREATE INDEX IF NOT EXISTS idx_automations_user ON automations(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_automation_steps_order ON automation_steps(automation_id, position);
 CREATE INDEX IF NOT EXISTS idx_enrollments_due ON automation_enrollments(status, next_run_at);
 CREATE INDEX IF NOT EXISTS idx_enrollments_contact ON automation_enrollments(contact_id);
+-- Bounce webhook tokens, stored only as a SHA-256 hash (the plaintext is shown once, when it is created).
+-- hint is the last four characters, so Settings can say which token is active. The older plaintext
+-- column deliverability_settings.webhook_token is emptied the first time it is used after an upgrade.
+CREATE TABLE IF NOT EXISTS webhook_tokens (
+  user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  token_hash TEXT NOT NULL UNIQUE,
+  hint TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  last_used_at TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_suppressed_user ON suppressed_addresses(user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_events_recipient ON events(recipient_id, type);
 `;

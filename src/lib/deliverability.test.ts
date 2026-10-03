@@ -41,6 +41,7 @@ import {
   updateSettings,
 } from "./queries";
 import { closeSql, readySql } from "./sql";
+import { makeSnsKit } from "./sns-test-helpers";
 import { runBatch } from "./worker-cycle";
 
 // SQLite by default; set DATABASE_URL to run the same tests against Postgres.
@@ -332,15 +333,17 @@ test("the webhook needs a valid token and applies SES and generic reports", asyn
     await queueCampaign(user.id, campaignId, "http://localhost:3010");
     await runBatch(10);
 
-    assert.equal((await handleWebhook("", "{}")).status, 401);
-    assert.equal((await handleWebhook("guess", "{}")).status, 401);
-    assert.equal((await getDeliverabilitySettings(user.id)).webhookToken, null);
+    const kit = makeSnsKit();
+    const hook = (token: string, body: string) => handleWebhook(token, body, { sns: kit.options });
+    assert.equal((await hook("", "{}")).status, 401);
+    assert.equal((await hook("guess", "{}")).status, 401);
+    assert.equal((await getDeliverabilitySettings(user.id)).hasWebhookToken, false);
     const token = await rotateWebhookToken(user.id);
-    assert.equal((await handleWebhook(token, "{not json")).status, 400);
-    assert.equal((await handleWebhook(token, '"just a string"')).json.ignored, 1);
+    assert.equal((await hook(token, "{not json")).status, 400);
+    assert.equal((await hook(token, '"just a string"')).json.ignored, 1);
 
-    const note = (message: unknown) => JSON.stringify({ Type: "Notification", Message: JSON.stringify(message) });
-    const bounce = await handleWebhook(
+    const note = (message: unknown) => JSON.stringify(kit.notification(JSON.stringify(message)));
+    const bounce = await hook(
       token,
       note({ notificationType: "Bounce", bounce: { bounceType: "Permanent", bouncedRecipients: [{ emailAddress: "hard@example.com", diagnosticCode: "550 5.1.1 unknown" }] } }),
     );
@@ -348,21 +351,21 @@ test("the webhook needs a valid token and applies SES and generic reports", asyn
     assert.equal(bounce.json.suppressed, 1);
     assert.equal(await suppressionReason(user.id, "hard@example.com"), "hard_bounce");
 
-    await handleWebhook(token, note({ notificationType: "Bounce", bounce: { bounceType: "Transient", bouncedRecipients: [{ emailAddress: "soft@example.com" }] } }));
+    await hook(token, note({ notificationType: "Bounce", bounce: { bounceType: "Transient", bouncedRecipients: [{ emailAddress: "soft@example.com" }] } }));
     assert.equal(await suppressionReason(user.id, "soft@example.com"), null, "a soft bounce is recorded but not suppressed");
 
-    await handleWebhook(token, note({ notificationType: "Complaint", complaint: { complaintFeedbackType: "abuse", complainedRecipients: [{ emailAddress: "mad@example.com" }] } }));
+    await hook(token, note({ notificationType: "Complaint", complaint: { complaintFeedbackType: "abuse", complainedRecipients: [{ emailAddress: "mad@example.com" }] } }));
     assert.equal(await suppressionReason(user.id, "mad@example.com"), "complaint");
     assert.equal(await count("SELECT COUNT(*) AS n FROM contacts WHERE user_id = ? AND email = ? AND status = 'unsubscribed'", user.id, "mad@example.com"), 1);
 
-    await handleWebhook(token, note({ notificationType: "Delivery", delivery: { recipients: ["ok@example.com"] } }));
-    const generic = await handleWebhook(token, JSON.stringify([{ type: "bounce", email: "gen@example.com", reason: "mailbox gone" }, { type: "bounce", email: "unknown@example.com" }]));
+    await hook(token, note({ notificationType: "Delivery", delivery: { recipients: ["ok@example.com"] } }));
+    const generic = await hook(token, JSON.stringify([{ type: "bounce", email: "gen@example.com", reason: "mailbox gone" }, { type: "bounce", email: "unknown@example.com" }]));
     assert.equal(generic.json.bounces, 2);
     assert.equal(await suppressionReason(user.id, "gen@example.com"), "hard_bounce");
     assert.equal(await suppressionReason(user.id, "unknown@example.com"), "hard_bounce", "even addresses never mailed are suppressed");
 
     // Events are attached to the campaign that sent the message, once each, however often SNS retries.
-    await handleWebhook(token, note({ notificationType: "Complaint", complaint: { complainedRecipients: [{ emailAddress: "mad@example.com" }] } }));
+    await hook(token, note({ notificationType: "Complaint", complaint: { complainedRecipients: [{ emailAddress: "mad@example.com" }] } }));
     const events = async (type: string) => count("SELECT COUNT(*) AS n FROM events WHERE campaign_id = ? AND type = ?", campaignId, type);
     assert.equal(await events("bounce"), 3);
     assert.equal(await events("complaint"), 1);
@@ -371,29 +374,38 @@ test("the webhook needs a valid token and applies SES and generic reports", asyn
 
     // SNS subscription handshake hands the link back to the route; a bogus link is ignored.
     const link = "https://sns.eu-west-1.amazonaws.com/?Action=ConfirmSubscription&Token=t";
-    assert.equal((await handleWebhook(token, JSON.stringify({ Type: "SubscriptionConfirmation", SubscribeURL: link }))).confirmUrl, link);
-    assert.equal((await handleWebhook(token, JSON.stringify({ Type: "SubscriptionConfirmation", SubscribeURL: "https://evil.example.com/" }))).confirmUrl, undefined);
+    assert.equal((await hook(token, JSON.stringify(kit.subscription(link)))).confirmUrl, link);
+    assert.equal((await hook(token, JSON.stringify(kit.subscription("https://evil.example.com/")))).confirmUrl, undefined);
 
     // A new token replaces the old one; turning the webhook off rejects everything.
     const next = await rotateWebhookToken(user.id);
     assert.notEqual(next, token);
-    assert.equal((await handleWebhook(token, "{}")).status, 401);
-    assert.equal((await handleWebhook(next, "{}")).status, 200);
+    assert.equal((await hook(token, "{}")).status, 401);
+    assert.equal((await hook(next, "{}")).status, 200);
     await clearWebhookToken(user.id);
-    assert.equal((await handleWebhook(next, "{}")).status, 401);
+    assert.equal((await hook(next, "{}")).status, 401);
   });
 });
 
 test("deliverability settings keep the DKIM selector and token independently", async () => {
   await withDatabase(async (ownerEmail) => {
     const user = await createUser({ name: "Ada", email: ownerEmail, password: "password123" });
-    assert.deepEqual(await getDeliverabilitySettings(user.id), { webhookToken: null, dkimSelector: "default" });
+    assert.deepEqual(await getDeliverabilitySettings(user.id), {
+      hasWebhookToken: false,
+      webhookTokenHint: null,
+      webhookTokenCreatedAt: null,
+      webhookTokenLastUsedAt: null,
+      dkimSelector: "default",
+    });
     assert.equal(await saveDkimSelector(user.id, "  "), "default");
     assert.equal(await saveDkimSelector(user.id, "s1"), "s1");
     const token = await rotateWebhookToken(user.id);
-    assert.deepEqual(await getDeliverabilitySettings(user.id), { webhookToken: token, dkimSelector: "s1" });
+    const settings = await getDeliverabilitySettings(user.id);
+    assert.equal(settings.hasWebhookToken, true);
+    assert.equal(settings.webhookTokenHint, token.slice(-4));
+    assert.equal(settings.dkimSelector, "s1");
     await assert.rejects(saveDkimSelector(user.id, "bad selector!"), /selector/);
     await saveDkimSelector(user.id, "k2._x");
-    assert.equal((await getDeliverabilitySettings(user.id)).webhookToken, token, "saving the selector keeps the token");
+    assert.equal((await handleWebhook(token, "{}")).status, 200, "saving the selector keeps the token");
   });
 });
