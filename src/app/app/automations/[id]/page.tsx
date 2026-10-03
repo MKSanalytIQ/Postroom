@@ -11,19 +11,23 @@ import {
   moveStepAction,
   pauseAutomationAction,
   removeStepAction,
+  saveRulesAction,
   updateAutomationAction,
 } from "@/lib/actions/automations";
 import {
   describeDelay,
   enrollmentCounts,
   getAutomation,
+  getRules,
   latestDeliveries,
   listSteps,
   recentEnrollments,
+  stepStats,
 } from "@/lib/automations";
 import { listLists, listTemplates } from "@/lib/queries";
+import { timeZoneOptions, WEEKDAYS } from "@/lib/send-window";
 import { requireUser } from "@/lib/session";
-import { formatWhen } from "@/lib/time";
+import { formatWhen, percent } from "@/lib/time";
 
 export const metadata: Metadata = { title: "Automation" };
 
@@ -39,14 +43,18 @@ export default async function AutomationPage({
   const query = await searchParams;
   const automation = await getAutomation(user.id, id);
   if (!automation) notFound();
-  const [steps, counts, enrollments, deliveries, lists, templates] = await Promise.all([
+  const [steps, counts, enrollments, deliveries, lists, templates, rules, stats] = await Promise.all([
     listSteps(user.id, id),
     enrollmentCounts(id),
     recentEnrollments(user.id, id),
     latestDeliveries(user.id, id),
     listLists(user.id),
     listTemplates(user.id),
+    getRules(user.id, id),
+    stepStats(user.id, id),
   ]);
+  const zones = timeZoneOptions();
+  if (!zones.includes(rules.timezone)) zones.push(rules.timezone);
   const active = automation.status === "active";
   return (
     <div className="stack">
@@ -148,6 +156,89 @@ export default async function AutomationPage({
       </section>
 
       <section className="panel stack">
+        <h2>Rules</h2>
+        <form action={saveRulesAction} className="stack">
+          <input type="hidden" name="id" value={automation.id} />
+          <h3>Stop early</h3>
+          <label className="check">
+            <input type="checkbox" name="exitOnClick" defaultChecked={rules.exitOnClick} />
+            Stop when the person clicks any link in this series
+          </label>
+          <label className="field">
+            <span>Stop when the person joins this list</span>
+            <select name="exitListId" defaultValue={rules.exitListId ?? ""}>
+              <option value="">Never</option>
+              {lists
+                .filter((list) => list.id !== automation.listId)
+                .map((list) => (
+                  <option key={list.id} value={list.id}>
+                    {list.name}
+                  </option>
+                ))}
+            </select>
+          </label>
+          <p className="fine">
+            Joining the list counts only after the person was enrolled. Link scanners in some mail systems can click links
+            automatically, which would also stop the series.
+          </p>
+          <h3>Send window</h3>
+          <label className="check">
+            <input type="checkbox" name="windowEnabled" defaultChecked={rules.windowEnabled} />
+            Only send emails on these days and hours
+          </label>
+          <div className="tag-row">
+            {WEEKDAYS.map((name, index) => (
+              <label key={name} className="check">
+                <input type="checkbox" name="days" value={index} defaultChecked={rules.windowDays.includes(index)} />
+                {name.slice(0, 3)}
+              </label>
+            ))}
+          </div>
+          <div className="two">
+            <div className="two">
+              <label className="field">
+                <span>From</span>
+                <select name="startHour" defaultValue={rules.windowStartHour}>
+                  {Array.from({ length: 24 }, (_, hour) => (
+                    <option key={hour} value={hour}>
+                      {String(hour).padStart(2, "0")}:00
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="field">
+                <span>Until</span>
+                <select name="endHour" defaultValue={rules.windowEndHour}>
+                  {Array.from({ length: 24 }, (_, index) => index + 1).map((hour) => (
+                    <option key={hour} value={hour}>
+                      {String(hour).padStart(2, "0")}:00
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <label className="field">
+              <span>Timezone</span>
+              <select name="timezone" defaultValue={rules.timezone}>
+                {zones.map((zone) => (
+                  <option key={zone} value={zone}>
+                    {zone}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <p className="fine">
+            An email that comes due outside the window waits for the next opening. Waits are not affected, so a series can
+            take a little longer than the sum of its waits. Rules can be changed while the automation is running.
+          </p>
+          <div className="action-row">
+            <SubmitButton pendingLabel="Saving…">Save rules</SubmitButton>
+          </div>
+        </form>
+      </section>
+
+      <section className="panel stack">
         <h2>Steps</h2>
         {steps.length === 0 ? (
           <p className="empty">No steps yet. Add an email to begin.</p>
@@ -166,6 +257,18 @@ export default async function AutomationPage({
                         ) : (
                           <span className="pill bad">template deleted</span>
                         )}
+                        {(() => {
+                          const stat = stats.get(step.id);
+                          if (!stat) return <div className="fine">Not sent yet</div>;
+                          return (
+                            <div className="fine">
+                              {stat.sent} sent · {stat.uniqueOpens} opened ({percent(stat.uniqueOpens, stat.sent)}) · {stat.uniqueClicks} clicked (
+                              {percent(stat.uniqueClicks, stat.sent)})
+                              {stat.waiting ? ` · ${stat.waiting} waiting` : ""}
+                              {stat.failed ? ` · ${stat.failed} failed` : ""}
+                            </div>
+                          );
+                        })()}
                       </>
                     ) : (
                       <>

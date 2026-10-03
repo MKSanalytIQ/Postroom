@@ -10,6 +10,7 @@ import {
   moveStep,
   pauseAutomation,
   removeStep,
+  saveRules,
   updateAutomation,
 } from "../automations";
 import { requestOrigin } from "../origin";
@@ -51,6 +52,20 @@ export async function createAutomationAction(formData: FormData): Promise<void> 
 export async function updateAutomationAction(formData: FormData): Promise<void> {
   await editAutomation(formData, "Automation saved.", (userId, id) =>
     updateAutomation(userId, id, { name: field(formData, "name"), listId: field(formData, "listId") || null }),
+  );
+}
+
+export async function saveRulesAction(formData: FormData): Promise<void> {
+  await editAutomation(formData, "Rules saved.", (userId, id) =>
+    saveRules(userId, id, {
+      exitOnClick: formData.get("exitOnClick") === "on",
+      exitListId: field(formData, "exitListId") || null,
+      windowEnabled: formData.get("windowEnabled") === "on",
+      windowDays: formData.getAll("days").map((day) => Number(day)),
+      windowStartHour: Number(field(formData, "startHour")),
+      windowEndHour: Number(field(formData, "endHour")),
+      timezone: field(formData, "timezone"),
+    }),
   );
 }
 
