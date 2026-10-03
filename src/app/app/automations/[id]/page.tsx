@@ -77,6 +77,9 @@ export default async function AutomationPage({
           </p>
         </div>
         <div className="action-row">
+          <Link className="btn btn-ghost" href={`/app/automations/${automation.id}/report`}>
+            Report
+          </Link>
           {active ? (
             <form action={pauseAutomationAction}>
               <input type="hidden" name="id" value={automation.id} />

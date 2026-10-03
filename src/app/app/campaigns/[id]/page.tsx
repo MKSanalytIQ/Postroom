@@ -51,10 +51,17 @@ export default async function CampaignPage({
             <Pill status={campaign.status} /> {campaign.listName ? `to ${campaign.listName}` : "no list yet"}
           </p>
         </div>
-        <form action={duplicateCampaignAction}>
-          <input type="hidden" name="id" value={campaign.id} />
-          <SubmitButton className="btn btn-ghost">Duplicate</SubmitButton>
-        </form>
+        <div className="action-row">
+          {campaign.status === "draft" ? null : (
+            <Link className="btn btn-ghost" href={`/app/campaigns/${campaign.id}/report`}>
+              Full report
+            </Link>
+          )}
+          <form action={duplicateCampaignAction}>
+            <input type="hidden" name="id" value={campaign.id} />
+            <SubmitButton className="btn btn-ghost">Duplicate</SubmitButton>
+          </form>
+        </div>
       </div>
       <Flash error={query.error} notice={query.notice} />
       {campaign.status === "draft" ? (
