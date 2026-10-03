@@ -19,7 +19,11 @@ export default async function OutboxPage({
   return (
     <div className="stack">
       <p className="fine">
-        <Link href={`/app/campaigns/${id}`}>Back to campaign</Link>
+        {delivery.automationId ? (
+          <Link href={`/app/automations/${delivery.automationId}`}>Back to automation</Link>
+        ) : (
+          <Link href={`/app/campaigns/${id}`}>Back to campaign</Link>
+        )}
       </p>
       <h1>{delivery.subject}</h1>
       <p className="muted">

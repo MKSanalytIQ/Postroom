@@ -87,6 +87,8 @@ export type DeliveryView = {
   token: string;
   status: string;
   createdAt: string;
+  /** Set when the message came from an automation rather than a campaign. */
+  automationId: string | null;
 };
 
 export type FailureRow = {
@@ -151,4 +153,73 @@ export type SendJob = {
   origin: string;
   userId: string;
   campaignStatus: string;
+  /** Set when the job belongs to an automation's hidden campaign. */
+  automationId: string | null;
+};
+
+export type AutomationStatus = "draft" | "active" | "paused";
+
+export type Automation = {
+  id: string;
+  name: string;
+  status: AutomationStatus;
+  listId: string | null;
+  listName: string | null;
+  /** Hidden campaign that owns this automation's recipients, tracking, and stored messages. */
+  campaignId: string;
+  createdAt: string;
+  updatedAt: string;
+  stepCount: number;
+  emailCount: number;
+};
+
+export type AutomationStep = {
+  id: string;
+  position: number;
+  kind: "email" | "delay";
+  templateId: string | null;
+  templateName: string | null;
+  delayMinutes: number;
+};
+
+export type EnrollmentCounts = {
+  active: number;
+  completed: number;
+  stopped: number;
+  total: number;
+  emailsSent: number;
+  emailsFailed: number;
+  emailsWaiting: number;
+};
+
+export type EnrollmentRow = {
+  id: string;
+  email: string;
+  status: "active" | "completed" | "stopped";
+  currentStep: number;
+  nextRunAt: string;
+  stopReason: string;
+  createdAt: string;
+  completedAt: string | null;
+};
+
+export type AutomationRules = {
+  exitOnClick: boolean;
+  exitListId: string | null;
+  exitListName: string | null;
+  windowEnabled: boolean;
+  /** Allowed weekdays, 0 = Sunday. */
+  windowDays: number[];
+  windowStartHour: number;
+  windowEndHour: number;
+  timezone: string;
+};
+
+export type StepStats = {
+  stepId: string;
+  sent: number;
+  failed: number;
+  waiting: number;
+  uniqueOpens: number;
+  uniqueClicks: number;
 };

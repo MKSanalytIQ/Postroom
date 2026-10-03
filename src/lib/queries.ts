@@ -194,10 +194,15 @@ export async function getAccount(userId: string): Promise<Account> {
 
 export async function campaignIsSending(campaignId: string): Promise<boolean> {
   const sql = await readySql();
-  const row = (await sql.prepare("SELECT status FROM campaigns WHERE id = ?").get(campaignId)) as
-    | { status: string }
-    | null;
-  return row?.status === "sending";
+  // An automation's hidden campaign accepts sends while the automation is active.
+  const row = (await sql
+    .prepare(
+      `SELECT c.status, a.status AS automation_status
+       FROM campaigns c LEFT JOIN automations a ON a.campaign_id = c.id WHERE c.id = ?`,
+    )
+    .get(campaignId)) as { status: string; automation_status: string | null } | null;
+  if (!row) return false;
+  return row.status === "sending" || (row.status === "automation" && row.automation_status === "active");
 }
 
 export async function smtpCredentials(userId: string): Promise<{
@@ -272,7 +277,7 @@ export async function recentCampaigns(userId: string): Promise<Campaign[]> {
       `SELECT c.id, c.name, c.subject, c.html, c.list_id, l.name AS list_name, c.from_name, c.from_email, c.reply_to,
               c.status, c.created_at, c.updated_at, c.started_at, c.finished_at
        FROM campaigns c LEFT JOIN lists l ON l.id = c.list_id
-       WHERE c.user_id = ? ORDER BY c.updated_at DESC LIMIT 6`,
+       WHERE c.user_id = ? AND c.status != 'automation' ORDER BY c.updated_at DESC LIMIT 6`,
     )
     .all(userId);
   return rows.map((row) => mapCampaign(row as Record<string, unknown>));
@@ -334,6 +339,10 @@ export async function getList(userId: string, listId: string): Promise<ContactLi
 
 export async function deleteList(userId: string, listId: string): Promise<void> {
   const sql = await readySql();
+  // The list reference is cleared by the foreign key, so an automation on it must not keep running.
+  await sql
+    .prepare("UPDATE automations SET status = 'paused', updated_at = ? WHERE list_id = ? AND user_id = ? AND status = 'active'")
+    .run(nowIso(), listId, userId);
   await sql.prepare("DELETE FROM lists WHERE id = ? AND user_id = ?").run(listId, userId);
 }
 
@@ -460,6 +469,14 @@ export async function setContactStatus(userId: string, contactId: string, status
     .prepare("UPDATE contacts SET status = ? WHERE id = ? AND user_id = ?")
     .run(status, contactId, userId);
   if (changed === 0) throw new UserError("Contact not found.");
+  if (status === "unsubscribed") {
+    await sql
+      .prepare(
+        `UPDATE automation_enrollments SET status = 'stopped', stop_reason = 'unsubscribed', updated_at = ?
+         WHERE contact_id = ? AND status = 'active'`,
+      )
+      .run(nowIso(), contactId);
+  }
 }
 
 export async function deleteContact(userId: string, contactId: string): Promise<void> {
@@ -610,6 +627,13 @@ export async function saveTemplate(
 
 export async function deleteTemplate(userId: string, id: string): Promise<void> {
   const sql = await readySql();
+  const inUse = (await sql
+    .prepare(
+      `SELECT a.name FROM automation_steps s JOIN automations a ON a.id = s.automation_id
+       WHERE s.template_id = ? AND a.user_id = ? ORDER BY a.name LIMIT 1`,
+    )
+    .get(id, userId)) as { name: string } | null;
+  if (inUse) throw new UserError(`This template is used by the automation "${inUse.name}". Remove that step first.`);
   await sql.prepare("DELETE FROM templates WHERE id = ? AND user_id = ?").run(id, userId);
 }
 
@@ -638,13 +662,13 @@ const CAMPAIGN_SELECT = `SELECT c.id, c.name, c.subject, c.html, c.list_id, l.na
 
 export async function listCampaigns(userId: string): Promise<Campaign[]> {
   const sql = await readySql();
-  const rows = await sql.prepare(`${CAMPAIGN_SELECT} WHERE c.user_id = ? ORDER BY c.updated_at DESC`).all(userId);
+  const rows = await sql.prepare(`${CAMPAIGN_SELECT} WHERE c.user_id = ? AND c.status != 'automation' ORDER BY c.updated_at DESC`).all(userId);
   return rows.map((row) => mapCampaign(row as Record<string, unknown>));
 }
 
 export async function getCampaign(userId: string, id: string): Promise<Campaign | null> {
   const sql = await readySql();
-  const row = await sql.prepare(`${CAMPAIGN_SELECT} WHERE c.id = ? AND c.user_id = ?`).get(id, userId);
+  const row = await sql.prepare(`${CAMPAIGN_SELECT} WHERE c.id = ? AND c.user_id = ? AND c.status != 'automation'`).get(id, userId);
   return row ? mapCampaign(row as Record<string, unknown>) : null;
 }
 
@@ -732,7 +756,8 @@ export async function duplicateCampaign(userId: string, campaignId: string): Pro
 
 export async function deleteCampaign(userId: string, campaignId: string): Promise<void> {
   const sql = await readySql();
-  await sql.prepare("DELETE FROM campaigns WHERE id = ? AND user_id = ?").run(campaignId, userId);
+  await sql.prepare("DELETE FROM campaigns WHERE id = ? AND user_id = ? AND status != 'automation'")
+    .run(campaignId, userId);
 }
 
 export async function subscribedCount(userId: string, listId: string | null): Promise<number> {
@@ -886,10 +911,12 @@ export async function getDelivery(userId: string, deliveryId: string): Promise<D
   const sql = await readySql();
   const row = (await sql
     .prepare(
-      `SELECT d.id, d.recipient_id, d.to_email, d.subject, d.html, d.mode, d.created_at, r.token, r.status
+      `SELECT d.id, d.recipient_id, d.to_email, d.subject, d.html, d.mode, d.created_at, r.token, r.status,
+              a.id AS automation_id
        FROM deliveries d
        JOIN recipients r ON r.id = d.recipient_id
        JOIN campaigns c ON c.id = r.campaign_id
+       LEFT JOIN automations a ON a.campaign_id = c.id
        WHERE d.id = ? AND c.user_id = ?`,
     )
     .get(deliveryId, userId)) as {
@@ -902,6 +929,7 @@ export async function getDelivery(userId: string, deliveryId: string): Promise<D
     created_at: string;
     token: string;
     status: string;
+    automation_id: string | null;
   } | null;
   if (!row) return null;
   return {
@@ -914,6 +942,7 @@ export async function getDelivery(userId: string, deliveryId: string): Promise<D
     token: row.token,
     status: row.status,
     createdAt: row.created_at,
+    automationId: row.automation_id,
   };
 }
 
@@ -935,7 +964,10 @@ export async function claimBatch(limit: number): Promise<SendJob[]> {
       .prepare(
         `SELECT r.id FROM recipients r
          JOIN campaigns c ON c.id = r.campaign_id
-         WHERE r.status = 'pending' AND c.status = 'sending'
+         WHERE r.status = 'pending'
+           AND (c.status = 'sending'
+             OR (c.status = 'automation'
+                 AND EXISTS (SELECT 1 FROM automations a WHERE a.campaign_id = c.id AND a.status = 'active')))
          ORDER BY r.created_at LIMIT ?`,
       )
       .all(limit)) as { id: string }[];
@@ -952,11 +984,19 @@ export async function claimBatch(limit: number): Promise<SendJob[]> {
   const rows = await sql
     .prepare(
       `SELECT r.id AS recipient_id, r.campaign_id, r.contact_id, contacts.status AS contact_status, r.email,
-              r.first_name, r.last_name, r.unsub_token, r.token, c.subject, c.html, c.from_name, c.from_email,
-              c.reply_to, c.origin, c.user_id, c.status AS campaign_status
+              r.first_name, r.last_name, r.unsub_token, r.token,
+              CASE WHEN s.recipient_id IS NULL THEN c.subject ELSE COALESCE(t.subject, '') END AS subject,
+              CASE WHEN s.recipient_id IS NULL THEN c.html ELSE COALESCE(t.html, '') END AS html,
+              c.from_name, c.from_email, c.reply_to,
+              CASE WHEN a.origin IS NULL OR a.origin = '' THEN c.origin ELSE a.origin END AS origin,
+              c.user_id, c.status AS campaign_status, a.id AS automation_id
        FROM recipients r
        JOIN campaigns c ON c.id = r.campaign_id
        LEFT JOIN contacts ON contacts.id = r.contact_id
+       LEFT JOIN automations a ON a.campaign_id = c.id
+       LEFT JOIN automation_sends s ON s.recipient_id = r.id
+       LEFT JOIN automation_steps st ON st.id = s.step_id
+       LEFT JOIN templates t ON t.id = st.template_id
        WHERE r.id IN (${placeholders})`,
     )
     .all(...claimed);
@@ -980,6 +1020,7 @@ export async function claimBatch(limit: number): Promise<SendJob[]> {
       origin: String(item.origin ?? ""),
       userId: String(item.user_id),
       campaignStatus: String(item.campaign_status),
+      automationId: item.automation_id,
     };
   });
 }
@@ -1054,6 +1095,32 @@ export async function recordClick(token: string, url: string): Promise<void> {
   await sql
     .prepare("INSERT INTO events (id, campaign_id, recipient_id, type, url, created_at) VALUES (?, ?, ?, 'click', ?, ?)")
     .run(newId(), row.campaign_id, row.id, url.slice(0, 2000), now);
+  // Automations can be set to stop a person's series as soon as they click any link in it.
+  const stopped = await sql
+    .prepare(
+      `UPDATE automation_enrollments SET status = 'stopped', stop_reason = 'clicked a link', updated_at = ?
+       WHERE status = 'active'
+         AND id IN (SELECT enrollment_id FROM automation_sends WHERE recipient_id = ?)
+         AND automation_id IN (SELECT automation_id FROM automation_settings WHERE exit_on_click = 1)`,
+    )
+    .run(now, row.id);
+  if (stopped > 0) await skipQueuedForStoppedEnrollments();
+}
+
+/** Anything still waiting to be delivered for an enrollment that has since been stopped is skipped. */
+export async function skipQueuedForStoppedEnrollments(): Promise<number> {
+  const sql = await readySql();
+  return sql
+    .prepare(
+      `UPDATE recipients SET status = 'skipped', error = 'Left the automation', claimed_at = NULL
+       WHERE status = 'pending'
+         AND id IN (
+           SELECT s.recipient_id FROM automation_sends s
+           JOIN automation_enrollments e ON e.id = s.enrollment_id
+           WHERE e.status = 'stopped' AND e.stop_reason != 'unsubscribed'
+         )`,
+    )
+    .run();
 }
 
 export type UnsubView = {
@@ -1087,6 +1154,15 @@ export async function unsubscribe(token: string, campaignId: string | null): Pro
   const changed = await sql
     .prepare("UPDATE contacts SET status = 'unsubscribed' WHERE unsub_token = ? AND status != 'unsubscribed'")
     .run(token);
+  if (changed > 0) {
+    // Never send another automation step to someone who has unsubscribed.
+    await sql
+      .prepare(
+        `UPDATE automation_enrollments SET status = 'stopped', stop_reason = 'unsubscribed', updated_at = ?
+         WHERE status = 'active' AND contact_id IN (SELECT id FROM contacts WHERE unsub_token = ?)`,
+      )
+      .run(nowIso(), token);
+  }
   if (changed > 0 && campaignId) {
     const recipient = (await sql
       .prepare(
