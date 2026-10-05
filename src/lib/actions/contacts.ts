@@ -2,6 +2,7 @@
 
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
+import { eraseContact } from "../gdpr";
 import { addContact, deleteContact, setContactStatus } from "../queries";
 import { requireUser } from "../session";
 import { UserError } from "../user-error";
@@ -58,4 +59,16 @@ export async function deleteContactAction(formData: FormData): Promise<void> {
     throw error;
   }
   redirect(withMessage(back.startsWith("/app") ? back : "/app/contacts", "notice", "Contact deleted."));
+}
+
+export async function eraseContactAction(formData: FormData): Promise<void> {
+  const user = await requireUser();
+  const back = String(formData.get("back") || "/app/contacts");
+  try {
+    const result = await eraseContact(user.id, String(formData.get("id") || ""));
+    redirect(withMessage(back.startsWith("/app") ? back : "/app/contacts", "notice", `Erased ${result.email}. The address was added to Suppressions.`));
+  } catch (error) {
+    if (error instanceof UserError) redirect(withMessage("/app/contacts", "error", error.message));
+    throw error;
+  }
 }

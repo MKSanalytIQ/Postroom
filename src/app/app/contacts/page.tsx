@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { ConfirmSubmit, Flash, PageHeader, Pager, Pill, SubmitButton } from "@/components/ui";
-import { addContactAction, deleteContactAction, setStatusAction } from "@/lib/actions/contacts";
+import { addContactAction, deleteContactAction, eraseContactAction, setStatusAction } from "@/lib/actions/contacts";
 import { importCsvAction } from "@/lib/actions/lists";
 import { consentByContactIds } from "@/lib/consent";
 import { listContacts } from "@/lib/queries";
@@ -108,6 +108,17 @@ export default async function ContactsPage({
                         <button className="btn btn-ghost" type="submit">
                           {contact.status === "subscribed" ? "Unsubscribe" : "Resubscribe"}
                         </button>
+                      </form>
+                      <a className="btn btn-ghost" href={`/app/contacts/${contact.id}/export`}>
+                        Export
+                      </a>
+                      <form action={eraseContactAction}>
+                        <input type="hidden" name="id" value={contact.id} />
+                        <input type="hidden" name="back" value="/app/contacts" />
+                        <ConfirmSubmit
+                          label="Erase"
+                          message={`Erase ${contact.email}? Removes the contact, anonymizes send history, and adds the address to Suppressions.`}
+                        />
                       </form>
                       <form action={deleteContactAction}>
                         <input type="hidden" name="id" value={contact.id} />
