@@ -1,12 +1,12 @@
 import type { Metadata } from "next";
 import { ConfirmSubmit, Flash, PageHeader, Pill, SubmitButton } from "@/components/ui";
 import { deleteAccountAction } from "@/lib/actions/auth";
-import { checkSenderAction, clearWebhookTokenAction, rotateWebhookTokenAction } from "@/lib/actions/deliverability";
+import { checkSenderAction, clearWebhookTokenAction } from "@/lib/actions/deliverability";
 import { saveSettingsAction, testSmtpAction } from "@/lib/actions/settings";
 import { getDeliverabilitySettings } from "@/lib/deliverability";
 import { checkSender } from "@/lib/dns-check";
-import { requestOrigin } from "@/lib/origin";
 import { requireUser } from "@/lib/session";
+import { WebhookTokenForm } from "@/components/webhook-token";
 
 export const metadata: Metadata = { title: "Settings" };
 
@@ -17,10 +17,10 @@ export default async function SettingsPage({
 }) {
   const user = await requireUser();
   const params = await searchParams;
-  const { webhookToken, dkimSelector } = await getDeliverabilitySettings(user.id);
+  const deliverability = await getDeliverabilitySettings(user.id);
+  const dkimSelector = deliverability.dkimSelector;
   const senderAddress = user.fromEmail || user.email;
   const sender = params.check ? await checkSender(senderAddress, dkimSelector) : null;
-  const webhookUrl = webhookToken ? `${await requestOrigin()}/api/webhooks/deliverability?token=${webhookToken}` : "";
   return (
     <div className="stack" style={{ maxWidth: 720 }}>
       <PageHeader
@@ -142,36 +142,30 @@ export default async function SettingsPage({
         <h2>Bounces and complaints</h2>
         <p className="fine">
           Hard bounces seen while sending are suppressed automatically. To also catch bounces and spam complaints that arrive
-          later, point your provider at the webhook below. Anyone with this URL can add to your suppression list, so keep it
-          private.
+          later, point your provider at the webhook. Anyone with the token can add to your suppression list, so keep it
+          private. Postroom stores only a hash of it, which is why a token is shown once, when you make it.
         </p>
-        {webhookToken ? (
-          <>
-            <label className="field">
-              <span>Webhook URL</span>
-              <input readOnly value={webhookUrl} aria-label="Webhook URL" />
-            </label>
-            <p className="fine">
-              Amazon SES: create an SNS topic for bounce and complaint notifications and add an HTTPS subscription with this URL.
-              Postroom confirms the subscription for you. Other providers can POST JSON such as{" "}
-              <code>{`{"type":"bounce","email":"a@example.com"}`}</code> (types: bounce, complaint, delivery; add{" "}
-              <code>{`"permanent":false`}</code> for a soft bounce). Tools that can set headers may send{" "}
-              <code>Authorization: Bearer &lt;token&gt;</code> instead of using the query string.
-            </p>
-            <div className="action-row">
-              <form action={rotateWebhookTokenAction}>
-                <SubmitButton className="btn btn-ghost">Make a new token</SubmitButton>
-              </form>
-              <form action={clearWebhookTokenAction}>
-                <ConfirmSubmit label="Turn off" message="Turn the webhook off? Bounce reports will stop being accepted." />
-              </form>
-            </div>
-          </>
-        ) : (
-          <form action={rotateWebhookTokenAction}>
-            <SubmitButton>Create webhook URL</SubmitButton>
+        {deliverability.hasWebhookToken ? (
+          <p className="fine">
+            Webhook is on. Active token ends in <code>{deliverability.webhookTokenHint ?? "????"}</code>
+            {deliverability.webhookTokenLastUsedAt ? `, last used ${deliverability.webhookTokenLastUsedAt.slice(0, 16).replace("T", " ")} UTC` : ", not used yet"}.
+            Endpoint: <code>POST /api/webhooks/deliverability</code> with <code>Authorization: Bearer &lt;token&gt;</code>.
+          </p>
+        ) : null}
+        <WebhookTokenForm hasToken={deliverability.hasWebhookToken} />
+        <p className="fine">
+          Amazon SES: create an SNS topic for bounce and complaint notifications and add an HTTPS subscription to the URL
+          with the token in it (SNS cannot send headers). Postroom checks the SNS signature on every message and confirms
+          the subscription for you. Other providers can POST JSON such as{" "}
+          <code>{`{"type":"bounce","email":"a@example.com"}`}</code> (types: bounce, complaint, delivery; add{" "}
+          <code>{`"permanent":false`}</code> for a soft bounce). Prefer the Bearer header where you can: a token in the URL
+          can end up in server logs and proxies.
+        </p>
+        {deliverability.hasWebhookToken ? (
+          <form action={clearWebhookTokenAction}>
+            <ConfirmSubmit label="Turn off" message="Turn the webhook off? Bounce reports will stop being accepted." />
           </form>
-        )}
+        ) : null}
       </section>
       <form action={deleteAccountAction} className="danger-zone">
         <h2>Delete account</h2>

@@ -1,6 +1,8 @@
 "use server";
 
+import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
+import { requestOrigin } from "../origin";
 import {
   addManualSuppressions,
   clearWebhookToken,
@@ -51,10 +53,15 @@ export async function checkSenderAction(formData: FormData): Promise<void> {
   redirect("/app/settings?check=1#sender");
 }
 
-export async function rotateWebhookTokenAction(): Promise<void> {
+export type WebhookTokenState = { token: string | null; webhookUrl: string; endpoint: string };
+
+/** Makes a new token and hands the plaintext back to the form once. It is never stored or put in a URL. */
+export async function rotateWebhookTokenAction(): Promise<WebhookTokenState> {
   const user = await requireUser();
-  await rotateWebhookToken(user.id);
-  redirect(withMessage("/app/settings#bounces", "notice", "New webhook token created. Update the URL wherever you used the old one."));
+  const token = await rotateWebhookToken(user.id);
+  revalidatePath("/app/settings");
+  const endpoint = `${await requestOrigin()}/api/webhooks/deliverability`;
+  return { token, endpoint, webhookUrl: `${endpoint}?token=${token}` };
 }
 
 export async function clearWebhookTokenAction(): Promise<void> {
