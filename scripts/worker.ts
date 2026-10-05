@@ -1,5 +1,6 @@
 process.env.POSTROOM_WORKER = "1";
 
+import { log, reportError } from "../src/lib/log";
 import { runWorkerCycle } from "../src/lib/worker-cycle";
 
 function sleep(ms: number): Promise<void> {
@@ -7,13 +8,13 @@ function sleep(ms: number): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  console.log("Postroom worker started");
+  log.info("worker_started");
   for (;;) {
     try {
       const work = await runWorkerCycle(5);
       await sleep(work === 0 ? 2000 : 50);
     } catch (error) {
-      console.error(error instanceof Error ? error.message : error);
+      await reportError(error, { component: "worker" });
       await sleep(3000);
     }
   }

@@ -19,6 +19,8 @@ Until SMTP is configured, Postroom runs in capture mode: each letter is stored o
 - SMTP retries with exponential backoff for temporary failures
 - Password reset and change-password in Settings
 - Consent records, attested CSV import, and optional double opt-in subscribe forms
+- DB-backed login/signup rate limits and progressive lockout
+- Per-account send rate limits, security headers, health check, and GDPR export/erase
 
 SMS, a drag-and-drop builder, and a shared sending IP are not part of this version.
 
@@ -135,6 +137,29 @@ Limits to know about: bounces that arrive by webhook are counted as bounce event
 Additive tables (created automatically on first start): `suppressed_addresses`, `deliverability_settings`, `webhook_tokens`, `recipient_attempts`, `password_reset_tokens`, `contact_consent`, `list_settings`, `subscribe_confirmations`, plus indexes. Nothing existing is altered. Nothing existing is altered.
 
 Webhook tokens are 192 random bits and are stored only as a SHA-256 hash, looked up by hash and compared in constant time. If you upgraded from a version that stored the token as plain text (`deliverability_settings.webhook_token`), the first webhook request or Settings visit after the upgrade hashes it into `webhook_tokens` and erases the plaintext. The URL you already gave your provider keeps working. The token is still the only authentication for non-SNS senders, so use HTTPS, prefer the Bearer header, and make a new token if one leaks. Database backups taken before the upgrade still contain the old plaintext token.
+
+## Auth abuse controls
+
+Login, signup, and forgot-password share **database-backed** rate limits (per IP and per email) so they work across multiple app instances. Login also uses progressive lockouts after repeated failures (1 minute after 5 failures, then 5 / 15 / 60 minutes). Error messages stay generic ("Email or password is wrong" / "Too many attempts") so they do not reveal whether an account exists.
+
+## Send rate limits
+
+In **Settings → Send rate limits**, set per-second / minute / hour / day ceilings for this account. The worker consults them when claiming recipients (campaigns and automations). Defaults: 2/s, 60/min, 1000/hour, 10000/day. Over-limit messages stay `pending` for a later cycle and still honor retry backoff.
+
+## Privacy (GDPR)
+
+- **Per-contact Export** downloads JSON (profile, consent, lists, recipients, events, deliveries metadata).
+- **Erase** deletes the contact, anonymizes recipient/delivery PII (aggregates remain), skips pending sends, and **adds the original address to Suppressions** (plain email) so it cannot be re-imported and mailed. Documented here deliberately: suppression uses the real address for blocklist matching.
+- **Settings → Download account data** exports the whole account (no SMTP password).
+- **Delete account** remains a full wipe via foreign-key cascades.
+
+## Observability
+
+Workers and the send pipeline emit **structured JSON logs** (`ts`, `level`, `msg`, …) with secrets redacted. Set optional `SENTRY_DSN` and install `@sentry/node` yourself to forward errors; without it, logging alone is used. `GET /api/health` checks the database and returns the latest worker heartbeat. Settings shows the heartbeat and whether it looks stale.
+
+## Security headers
+
+`next.config.ts` sets CSP, `nosniff`, `Referrer-Policy`, `Permissions-Policy`, `X-Frame-Options: DENY` / `frame-ancestors 'none'`, and HSTS in production. Template previews keep using sandboxed `srcDoc` iframes. Tracking pixel, click, and unsubscribe routes are same-origin and continue to work.
 
 ## Password reset
 

@@ -3,6 +3,8 @@ import { composeEmail, formatAddress } from "./render";
 import { classifyDeliveryError } from "./bounces";
 import { runAutomationCycle } from "./automations";
 import { recordHardBounce, REASON_LABELS, suppressionReason } from "./deliverability";
+import { touchWorkerHeartbeat } from "./heartbeat";
+import { log } from "./log";
 import { clearRecipientAttempts, scheduleTransientRetry } from "./retries";
 import {
   campaignIsSending,
@@ -95,9 +97,7 @@ async function processJob(job: SendJob): Promise<void> {
     }
     await markRecipient(job.recipientId, "sent", "");
     await clearRecipientAttempts(job.recipientId);
-    if (process.env.POSTROOM_WORKER) {
-      console.log(`${account.smtpConfigured ? "smtp" : "capture"} ${job.email}`);
-    }
+    log.info("message_sent", { email: job.email, mode: account.smtpConfigured ? "smtp" : "capture", campaignId: job.campaignId });
   } catch (error) {
     const failure = classifyDeliveryError(error);
     if (failure.kind === "hard_bounce") {
@@ -108,22 +108,22 @@ async function processJob(job: SendJob): Promise<void> {
         email: job.email,
         message: failure.message,
       });
-      if (process.env.POSTROOM_WORKER) console.log(`bounced ${job.email}: ${failure.message}`);
+      log.info("message_bounced", { email: job.email, error: failure.message, campaignId: job.campaignId });
       return;
     }
     if (failure.kind === "transient") {
       const retry = await scheduleTransientRetry(job.recipientId, failure.message);
       if (retry.scheduled) {
-        if (process.env.POSTROOM_WORKER) console.log(`retry ${job.email} attempt ${retry.attemptCount} at ${retry.nextAttemptAt}`);
+        log.info("message_retry", { email: job.email, attempt: retry.attemptCount, nextAttemptAt: retry.nextAttemptAt, campaignId: job.campaignId });
         return;
       }
       await markRecipient(job.recipientId, "failed", `Gave up after ${retry.attemptCount} attempts: ${failure.message}`);
-      if (process.env.POSTROOM_WORKER) console.log(`failed ${job.email}: max retries`);
+      log.warn("message_failed", { email: job.email, reason: "max_retries", campaignId: job.campaignId });
       return;
     }
     const message = error instanceof UserError || error instanceof Error ? error.message : failure.message;
     await markRecipient(job.recipientId, "failed", message);
-    if (process.env.POSTROOM_WORKER) console.log(`failed ${job.email}: ${message}`);
+    log.warn("message_failed", { email: job.email, error: message, campaignId: job.campaignId });
   }
 }
 
@@ -143,5 +143,7 @@ export async function runBatch(limit = 5): Promise<number> {
 export async function runWorkerCycle(limit = 5): Promise<number> {
   const advanced = await runAutomationCycle();
   const sent = await runBatch(limit);
-  return advanced + sent;
+  const work = advanced + sent;
+  await touchWorkerHeartbeat(work ? `work=${work}` : "idle");
+  return work;
 }
