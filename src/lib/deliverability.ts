@@ -16,6 +16,7 @@ const PAGE_SIZE = 50;
 
 export const REASON_LABELS: Record<SuppressionReason, string> = {
   hard_bounce: "Hard bounce",
+  soft_bounce: "Soft bounce",
   complaint: "Complaint",
   manual: "Added by hand",
 };
@@ -144,7 +145,7 @@ export async function suppressionCounts(userId: string): Promise<Record<Suppress
   const rows = (await sql
     .prepare("SELECT reason, COUNT(*) AS n FROM suppressed_addresses WHERE user_id = ? GROUP BY reason")
     .all(userId)) as { reason: SuppressionReason; n: number | string }[];
-  const counts: Record<SuppressionReason, number> = { hard_bounce: 0, complaint: 0, manual: 0 };
+  const counts: Record<SuppressionReason, number> = { hard_bounce: 0, soft_bounce: 0, complaint: 0, manual: 0 };
   for (const row of rows) if (row.reason in counts) counts[row.reason] = Number(row.n);
   return counts;
 }
@@ -323,8 +324,19 @@ async function applyEvent(userId: string, event: WebhookEvent, summary: WebhookS
   if (event.kind === "bounce") {
     summary.bounces += 1;
     if (recipient) await recordEventOnce(recipient.campaign_id, recipient.id, "bounce", event.reason);
-    if (event.permanent && (await addSuppression(userId, event.email, "hard_bounce", { detail: event.reason, source: "webhook" }))) {
-      summary.suppressed += 1;
+    if (event.permanent) {
+      if (await addSuppression(userId, event.email, "hard_bounce", { detail: event.reason, source: "webhook" })) {
+        summary.suppressed += 1;
+      }
+    } else {
+      const { recordSoftBounce } = await import("./soft-bounces");
+      const result = await recordSoftBounce({
+        userId,
+        email: event.email,
+        source: "webhook",
+        detail: event.reason,
+      });
+      if (result.suppressed) summary.suppressed += 1;
     }
     return;
   }

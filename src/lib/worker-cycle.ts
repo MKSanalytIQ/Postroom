@@ -3,6 +3,7 @@ import { composeEmail, formatAddress } from "./render";
 import { classifyDeliveryError } from "./bounces";
 import { runAutomationCycle } from "./automations";
 import { recordHardBounce, REASON_LABELS, suppressionReason } from "./deliverability";
+import { recordSoftBounce } from "./soft-bounces";
 import { touchWorkerHeartbeat } from "./heartbeat";
 import { log } from "./log";
 import { clearRecipientAttempts, scheduleTransientRetry } from "./retries";
@@ -117,6 +118,12 @@ async function processJob(job: SendJob): Promise<void> {
         log.info("message_retry", { email: job.email, attempt: retry.attemptCount, nextAttemptAt: retry.nextAttemptAt, campaignId: job.campaignId });
         return;
       }
+      await recordSoftBounce({
+        userId: job.userId,
+        email: job.email,
+        source: "smtp",
+        detail: failure.message,
+      });
       await markRecipient(job.recipientId, "failed", `Gave up after ${retry.attemptCount} attempts: ${failure.message}`);
       log.warn("message_failed", { email: job.email, reason: "max_retries", campaignId: job.campaignId });
       return;
