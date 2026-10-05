@@ -2,8 +2,13 @@ import type { Metadata } from "next";
 import { ConfirmSubmit, Flash, PageHeader, Pill, SubmitButton } from "@/components/ui";
 import { changePasswordAction, deleteAccountAction } from "@/lib/actions/auth";
 import { checkSenderAction, clearWebhookTokenAction } from "@/lib/actions/deliverability";
-import { saveSendLimitsAction, saveSettingsAction, testSmtpAction } from "@/lib/actions/settings";
+import { resendVerificationAction } from "@/lib/actions/auth";
+import { saveAccountSettingsAction, saveSendLimitsAction, saveSettingsAction, testSmtpAction } from "@/lib/actions/settings";
+import { getAccountSettings } from "@/lib/account-settings";
 import { getDeliverabilitySettings } from "@/lib/deliverability";
+import { migrationStatus } from "@/lib/migrations";
+import { timeZoneOptions } from "@/lib/send-window";
+import { readySql } from "@/lib/sql";
 import { latestWorkerHeartbeat } from "@/lib/heartbeat";
 import { getSendLimits } from "@/lib/send-limits";
 import { checkSender } from "@/lib/dns-check";
@@ -22,7 +27,11 @@ export default async function SettingsPage({
   const deliverability = await getDeliverabilitySettings(user.id);
   const dkimSelector = deliverability.dkimSelector;
   const sendLimits = await getSendLimits(user.id);
+  const accountPrefs = await getAccountSettings(user.id);
   const worker = await latestWorkerHeartbeat();
+  const migrations = await migrationStatus(await readySql());
+  const zones = timeZoneOptions();
+  if (!zones.includes(accountPrefs.timezone)) zones.unshift(accountPrefs.timezone);
   const senderAddress = user.fromEmail || user.email;
   const sender = params.check ? await checkSender(senderAddress, dkimSelector) : null;
   return (
@@ -32,6 +41,68 @@ export default async function SettingsPage({
         lede="The postal address is printed on every campaign. SMTP is how the mail actually leaves."
       />
       <Flash error={params.error} notice={params.notice} />
+      <section id="verify" className="panel stack">
+        <h2>Email verification</h2>
+        {user.emailVerified ? (
+          <p className="fine">
+            <Pill status="sent" /> <strong>{user.email}</strong> is verified. You can send campaigns and activate automations.
+          </p>
+        ) : (
+          <>
+            <p className="fine">
+              <Pill status="paused" /> <strong>{user.email}</strong> is not verified yet. You can sign in, but campaigns and
+              automations stay locked until you confirm the address.
+            </p>
+            <form action={resendVerificationAction}>
+              <SubmitButton className="btn btn-ghost">Resend verification email</SubmitButton>
+            </form>
+          </>
+        )}
+      </section>
+      <section id="account-prefs" className="panel stack">
+        <h2>Timezone and soft bounces</h2>
+        <p className="fine">
+          Report day buckets and CSV dates use this timezone. Soft bounces (temporary SMTP failures after retries, and
+          webhook soft/transient events) auto-suppress an address after the threshold within the window.
+        </p>
+        <form action={saveAccountSettingsAction} className="stack">
+          <label className="field">
+            <span>Account timezone</span>
+            <select name="timezone" defaultValue={accountPrefs.timezone}>
+              {zones.map((zone) => (
+                <option key={zone} value={zone}>
+                  {zone}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="two">
+            <label className="field">
+              <span>Soft-bounce threshold</span>
+              <input
+                name="softBounceThreshold"
+                type="number"
+                min={1}
+                max={100}
+                defaultValue={accountPrefs.softBounceThreshold}
+                required
+              />
+            </label>
+            <label className="field">
+              <span>Soft-bounce window (days)</span>
+              <input
+                name="softBounceWindowDays"
+                type="number"
+                min={1}
+                max={365}
+                defaultValue={accountPrefs.softBounceWindowDays}
+                required
+              />
+            </label>
+          </div>
+          <SubmitButton className="btn btn-ghost">Save preferences</SubmitButton>
+        </form>
+      </section>
       <form action={saveSettingsAction} className="stack">
         <label className="field">
           <span>Your name</span>
@@ -213,6 +284,20 @@ export default async function SettingsPage({
         <p className="fine">
           Health check: <a href="/api/health">/api/health</a>
         </p>
+      </section>
+      <section id="migrations" className="panel stack">
+        <h2>Database migrations</h2>
+        <p className="fine">
+          Schema version is applied automatically on startup. You can also run <code>npm run migrate</code>. Pending:{" "}
+          {migrations.pending.length ? migrations.pending.join(", ") : "none"}.
+        </p>
+        <ul className="fine">
+          {migrations.applied.map((row) => (
+            <li key={row.id}>
+              <code>{row.id}</code> — {row.appliedAt.replace("T", " ").slice(0, 19)} UTC
+            </li>
+          ))}
+        </ul>
       </section>
       <section id="privacy" className="panel stack">
         <h2>Privacy</h2>

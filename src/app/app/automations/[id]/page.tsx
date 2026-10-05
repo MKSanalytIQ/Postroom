@@ -247,8 +247,9 @@ export default async function AutomationPage({
             </label>
           </div>
           <p className="fine">
-            An email that comes due outside the window waits for the next opening. Waits are not affected, so a series can
-            take a little longer than the sum of its waits. Rules can be changed while the automation is running.
+            An email that comes due outside the window waits for the next opening. If Until is earlier than or equal to From,
+            the window wraps past midnight (for example 22:00 until 06:00). Include every calendar day the overnight window
+            should cover. Waits are not affected. Rules can be changed while the automation is running.
           </p>
           <div className="action-row">
             <SubmitButton pendingLabel="Saving…">Save rules</SubmitButton>
