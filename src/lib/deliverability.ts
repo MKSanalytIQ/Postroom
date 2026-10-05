@@ -1,8 +1,9 @@
 import { toCsv } from "./csv";
-import { newId, newToken } from "./crypto";
-import { parseWebhookPayload, type WebhookEvent } from "./bounces";
+import { hashWebhookToken, newId, newToken, safeEqual } from "./crypto";
+import { findSnsEnvelopes, parseWebhookPayload, type WebhookEvent } from "./bounces";
 import { markRecipient } from "./queries";
-import { readySql } from "./sql";
+import { verifySnsMessage, type SnsVerifyOptions } from "./sns";
+import { readySql, type Sql } from "./sql";
 import { nowIso } from "./time";
 import type { Page, Suppression, SuppressionReason } from "./types";
 import { UserError } from "./user-error";
@@ -186,30 +187,87 @@ async function recordEventOnce(campaignId: string, recipientId: string, type: st
 
 // ---------- webhook ----------
 
-export async function getDeliverabilitySettings(userId: string): Promise<{ webhookToken: string | null; dkimSelector: string }> {
-  const sql = await readySql();
-  const row = (await sql
-    .prepare("SELECT webhook_token, dkim_selector FROM deliverability_settings WHERE user_id = ?")
-    .get(userId)) as { webhook_token: string | null; dkim_selector: string } | null;
-  return { webhookToken: row?.webhook_token ?? null, dkimSelector: row?.dkim_selector || "default" };
+export type DeliverabilitySettings = {
+  hasWebhookToken: boolean;
+  /** Last four characters of the active token, so you can tell which one is in use. The token itself is never stored. */
+  webhookTokenHint: string | null;
+  webhookTokenCreatedAt: string | null;
+  webhookTokenLastUsedAt: string | null;
+  dkimSelector: string;
+};
+
+const migrated = new WeakSet<Sql>();
+
+/**
+ * Tokens created before hashing existed sit in deliverability_settings.webhook_token as plaintext.
+ * The first time anything touches webhook tokens after an upgrade, each is hashed into webhook_tokens and the
+ * plaintext is erased. The old URL keeps working (its hash matches). Safe to run from several processes at once.
+ */
+async function migrateLegacyTokens(sql: Sql): Promise<void> {
+  if (migrated.has(sql)) return;
+  const legacy = (await sql
+    .prepare("SELECT user_id, webhook_token FROM deliverability_settings WHERE webhook_token IS NOT NULL")
+    .all()) as { user_id: string; webhook_token: string }[];
+  for (const row of legacy) {
+    await sql.transaction(async (tx) => {
+      await tx
+        .prepare(
+          `INSERT INTO webhook_tokens (user_id, token_hash, hint, created_at) VALUES (?, ?, ?, ?)
+           ON CONFLICT (user_id) DO NOTHING`,
+        )
+        .run(row.user_id, hashWebhookToken(row.webhook_token), row.webhook_token.slice(-4), nowIso());
+      await tx.prepare("UPDATE deliverability_settings SET webhook_token = NULL WHERE user_id = ? AND webhook_token = ?").run(row.user_id, row.webhook_token);
+    });
+  }
+  migrated.add(sql);
 }
 
-/** Creates (or replaces) the secret that authorises bounce webhooks for this account. */
+export async function getDeliverabilitySettings(userId: string): Promise<DeliverabilitySettings> {
+  const sql = await readySql();
+  await migrateLegacyTokens(sql);
+  const settings = (await sql.prepare("SELECT dkim_selector FROM deliverability_settings WHERE user_id = ?").get(userId)) as
+    | { dkim_selector: string }
+    | null;
+  const token = (await sql.prepare("SELECT hint, created_at, last_used_at FROM webhook_tokens WHERE user_id = ?").get(userId)) as
+    | { hint: string; created_at: string; last_used_at: string | null }
+    | null;
+  return {
+    hasWebhookToken: Boolean(token),
+    webhookTokenHint: token ? token.hint || null : null,
+    webhookTokenCreatedAt: token?.created_at ?? null,
+    webhookTokenLastUsedAt: token?.last_used_at ?? null,
+    dkimSelector: settings?.dkim_selector || "default",
+  };
+}
+
+/**
+ * Creates (or replaces) the secret that authorises bounce webhooks for this account. Only its hash is
+ * stored, so the returned plaintext is the one and only chance to copy it.
+ */
 export async function rotateWebhookToken(userId: string): Promise<string> {
   const token = newToken();
   const sql = await readySql();
-  await sql
-    .prepare(
-      `INSERT INTO deliverability_settings (user_id, webhook_token, updated_at) VALUES (?, ?, ?)
-       ON CONFLICT (user_id) DO UPDATE SET webhook_token = excluded.webhook_token, updated_at = excluded.updated_at`,
-    )
-    .run(userId, token, nowIso());
+  await migrateLegacyTokens(sql);
+  const now = nowIso();
+  await sql.transaction(async (tx) => {
+    await tx
+      .prepare(
+        `INSERT INTO webhook_tokens (user_id, token_hash, hint, created_at, last_used_at) VALUES (?, ?, ?, ?, NULL)
+         ON CONFLICT (user_id) DO UPDATE SET token_hash = excluded.token_hash, hint = excluded.hint,
+           created_at = excluded.created_at, last_used_at = NULL`,
+      )
+      .run(userId, hashWebhookToken(token), token.slice(-4), now);
+    await tx.prepare("UPDATE deliverability_settings SET webhook_token = NULL, updated_at = ? WHERE user_id = ?").run(now, userId);
+  });
   return token;
 }
 
 export async function clearWebhookToken(userId: string): Promise<void> {
   const sql = await readySql();
-  await sql.prepare("UPDATE deliverability_settings SET webhook_token = NULL, updated_at = ? WHERE user_id = ?").run(nowIso(), userId);
+  await sql.transaction(async (tx) => {
+    await tx.prepare("DELETE FROM webhook_tokens WHERE user_id = ?").run(userId);
+    await tx.prepare("UPDATE deliverability_settings SET webhook_token = NULL, updated_at = ? WHERE user_id = ?").run(nowIso(), userId);
+  });
 }
 
 const SELECTOR = /^[a-z0-9]([a-z0-9._-]{0,60}[a-z0-9])?$/i;
@@ -227,13 +285,23 @@ export async function saveDkimSelector(userId: string, selector: string): Promis
   return value;
 }
 
+const MAX_TOKEN_LENGTH = 200;
+const LAST_USED_EVERY_MS = 60 * 60 * 1000;
+
+/** Finds the account for a presented token by its hash, then re-checks the hash in constant time. */
 async function userIdForToken(token: string): Promise<string | null> {
-  if (!token) return null;
+  if (!token || token.length > MAX_TOKEN_LENGTH) return null;
   const sql = await readySql();
-  const row = (await sql.prepare("SELECT user_id FROM deliverability_settings WHERE webhook_token = ?").get(token)) as
-    | { user_id: string }
+  await migrateLegacyTokens(sql);
+  const hash = hashWebhookToken(token);
+  const row = (await sql.prepare("SELECT user_id, token_hash, last_used_at FROM webhook_tokens WHERE token_hash = ?").get(hash)) as
+    | { user_id: string; token_hash: string; last_used_at: string | null }
     | null;
-  return row?.user_id ?? null;
+  if (!row || !safeEqual(row.token_hash, hash)) return null;
+  if (!row.last_used_at || Date.now() - Date.parse(row.last_used_at) > LAST_USED_EVERY_MS) {
+    await sql.prepare("UPDATE webhook_tokens SET last_used_at = ? WHERE user_id = ?").run(nowIso(), row.user_id);
+  }
+  return row.user_id;
 }
 
 export type WebhookSummary = { bounces: number; complaints: number; deliveries: number; suppressed: number; ignored: number };
@@ -272,8 +340,13 @@ export type WebhookResult = {
   confirmUrl?: string;
 };
 
-/** The whole webhook, minus the HTTP plumbing: check the token, parse the body, apply the events. */
-export async function handleWebhook(token: string, body: string): Promise<WebhookResult> {
+export type WebhookOptions = { sns?: SnsVerifyOptions };
+
+/**
+ * The whole webhook, minus the HTTP plumbing: check the token, verify any Amazon SNS signatures, parse the
+ * body, apply the events. A request with an SNS envelope whose signature does not verify is refused outright.
+ */
+export async function handleWebhook(token: string, body: string, options: WebhookOptions = {}): Promise<WebhookResult> {
   const userId = await userIdForToken(token);
   if (!userId) return { status: 401, json: { ok: false, error: "Invalid token." } };
   let data: unknown;
@@ -282,8 +355,14 @@ export async function handleWebhook(token: string, body: string): Promise<Webhoo
   } catch {
     return { status: 400, json: { ok: false, error: "The body must be JSON." } };
   }
-  const parsed = parseWebhookPayload(data);
-  const summary: WebhookSummary = { bounces: 0, complaints: 0, deliveries: 0, suppressed: 0, ignored: parsed.ignored };
+  const verified = new Set<object>();
+  for (const envelope of findSnsEnvelopes(data)) {
+    const verdict = await verifySnsMessage(envelope, options.sns);
+    if (!verdict.ok) return { status: 403, json: { ok: false, error: `SNS signature check failed. ${verdict.reason}` } };
+    verified.add(envelope);
+  }
+  const parsed = parseWebhookPayload(data, { verifiedSns: verified });
+  const summary: WebhookSummary = { bounces: 0, complaints: 0, deliveries: 0, suppressed: 0, ignored: parsed.ignored + parsed.unverified };
   for (const event of parsed.events) await applyEvent(userId, event, summary);
   return {
     status: 200,

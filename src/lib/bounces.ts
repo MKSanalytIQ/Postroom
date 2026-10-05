@@ -16,6 +16,13 @@ export type ParsedWebhook = {
   confirmUrl: string | null;
   /** Items that were understood as JSON but not as an event (ignored, not an error). */
   ignored: number;
+  /** SNS envelopes that were skipped because they were not in the verified set. Always 0 when no set is given. */
+  unverified: number;
+};
+
+export type ParseOptions = {
+  /** When given, only SNS envelopes in this set are trusted; any other SNS-shaped object is skipped and counted. */
+  verifiedSns?: ReadonlySet<object>;
 };
 
 /** Only follow an SNS confirmation link that really points at Amazon SNS over HTTPS. */
@@ -100,7 +107,7 @@ function parseGeneric(item: Record<string, unknown>): WebhookEvent | null {
   return null;
 }
 
-function parseItem(item: unknown, out: ParsedWebhook, depth: number): void {
+function parseItem(item: unknown, out: ParsedWebhook, depth: number, options: ParseOptions): void {
   const data = record(item);
   if (!data || depth > 3) {
     out.ignored += 1;
@@ -108,6 +115,10 @@ function parseItem(item: unknown, out: ParsedWebhook, depth: number): void {
   }
   const snsType = text(data.Type);
   if (snsType) {
+    if (options.verifiedSns && !options.verifiedSns.has(data)) {
+      out.unverified += 1;
+      return;
+    }
     if (snsType === "SubscriptionConfirmation") {
       if (isSnsSubscribeUrl(data.SubscribeURL)) out.confirmUrl = data.SubscribeURL;
       else out.ignored += 1;
@@ -118,7 +129,7 @@ function parseItem(item: unknown, out: ParsedWebhook, depth: number): void {
       } catch {
         inner = null;
       }
-      parseItem(inner, out, depth + 1);
+      parseItem(inner, out, depth + 1, options);
     } else {
       out.ignored += 1;
     }
@@ -131,7 +142,7 @@ function parseItem(item: unknown, out: ParsedWebhook, depth: number): void {
     return;
   }
   if (Array.isArray(data.events)) {
-    for (const entry of data.events) parseItem(entry, out, depth + 1);
+    for (const entry of data.events) parseItem(entry, out, depth + 1, options);
     return;
   }
   const generic = parseGeneric(data);
@@ -140,11 +151,35 @@ function parseItem(item: unknown, out: ParsedWebhook, depth: number): void {
 }
 
 /** Turns a webhook body (SNS, raw SES, or the generic format; one object or an array) into events. */
-export function parseWebhookPayload(body: unknown): ParsedWebhook {
-  const out: ParsedWebhook = { events: [], confirmUrl: null, ignored: 0 };
+export function parseWebhookPayload(body: unknown, options: ParseOptions = {}): ParsedWebhook {
+  const out: ParsedWebhook = { events: [], confirmUrl: null, ignored: 0, unverified: 0 };
   const items = Array.isArray(body) ? body : [body];
-  for (const item of items.slice(0, 1000)) parseItem(item, out, 0);
+  for (const item of items.slice(0, MAX_ITEMS)) parseItem(item, out, 0, options);
   return out;
+}
+
+const MAX_ITEMS = 1000;
+
+/**
+ * Every SNS envelope (an object with a string `Type`) at the places the parser would unwrap one:
+ * the body itself, array entries, and `events` entries. The caller verifies each signature, then passes
+ * the verified ones back through `ParseOptions.verifiedSns`. Envelopes found inside an SNS `Message`
+ * string are never trusted, because SNS does not nest them.
+ */
+export function findSnsEnvelopes(body: unknown): Record<string, unknown>[] {
+  const found: Record<string, unknown>[] = [];
+  const visit = (item: unknown, depth: number): void => {
+    const data = record(item);
+    if (!data || depth > 3) return;
+    if (text(data.Type)) {
+      found.push(data);
+      return;
+    }
+    if (data.notificationType || data.eventType) return;
+    if (Array.isArray(data.events)) for (const entry of data.events) visit(entry, depth + 1);
+  };
+  for (const item of (Array.isArray(body) ? body : [body]).slice(0, MAX_ITEMS)) visit(item, 0);
+  return found;
 }
 
 export type DeliveryFailure = {

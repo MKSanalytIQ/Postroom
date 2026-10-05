@@ -61,6 +61,21 @@ export function decryptSecret(payload: string): string {
   return plain.toString("utf8");
 }
 
+/**
+ * SHA-256 of a webhook token, domain-separated. The tokens are 192 random bits, so a fast unsalted hash is
+ * enough: there is nothing to brute-force, and the stored value cannot be turned back into a working token.
+ */
+export function hashWebhookToken(token: string): string {
+  return createHash("sha256").update(`postroom-webhook-token-v1:${token}`, "utf8").digest("hex");
+}
+
+/** Constant-time string comparison (false on a length mismatch without comparing). */
+export function safeEqual(a: string, b: string): boolean {
+  const left = Buffer.from(a, "utf8");
+  const right = Buffer.from(b, "utf8");
+  return left.length === right.length && timingSafeEqual(left, right);
+}
+
 export function signClick(token: string, target: string): { payload: string; signature: string } {
   const payload = Buffer.from(target, "utf8").toString("base64url");
   const signature = createHmac("sha256", getSecret()).update(`${token}.${payload}`).digest("base64url");
