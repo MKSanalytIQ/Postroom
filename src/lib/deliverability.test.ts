@@ -197,7 +197,7 @@ test("suppressed addresses are skipped by imports, manual adds, and campaigns", 
     await addSuppression(user.id, "blocked@example.com", "hard_bounce");
 
     await assert.rejects(addContact(user.id, { email: "Blocked@example.com", firstName: "", lastName: "", listId }), /suppression list/);
-    const imported = await importContacts(user.id, listId, "email,first name\nblocked@example.com,Blocked\nnew@example.com,New\n");
+    const imported = await importContacts(user.id, listId, "email,first name\nblocked@example.com,Blocked\nnew@example.com,New\n", { consentAttested: true });
     assert.equal(imported.suppressed, 1);
     assert.equal(imported.created, 1);
     assert.equal(imported.addedToList, 1);

@@ -166,7 +166,7 @@ test("a welcome series enrolls new list members once and sends each step through
     await addContact(user.id, { email: "ada@example.com", firstName: "Ada", lastName: "Lovelace", listId });
     await addContact(user.id, { email: "grace@example.com", firstName: "Grace", lastName: "Hopper", listId });
     await setContactStatus(user.id, await contactId(user.id, "grace@example.com"), "unsubscribed");
-    const imported = await importContacts(user.id, listId, "email,first name\nlinus@example.com,Linus\nada@example.com,Ada\nnot-an-email,No\n");
+    const imported = await importContacts(user.id, listId, "email,first name\nlinus@example.com,Linus\nada@example.com,Ada\nnot-an-email,No\n", { consentAttested: true });
     assert.equal(imported.addedToList, 1);
 
     // ada + linus enrolled; grace is unsubscribed; old and draft joined before activation.

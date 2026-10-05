@@ -20,6 +20,7 @@ import type {
   SettingsInput,
   Template,
 } from "./types";
+import { recordConsent, type ConsentSource } from "./consent";
 import { UserError } from "./user-error";
 import { isEmail, normalizeEmail, sendBlockers } from "./validators";
 
@@ -430,7 +431,16 @@ const LINK_CONTACT = `INSERT INTO list_contacts (list_id, contact_id, created_at
 
 export async function addContact(
   userId: string,
-  input: { email: string; firstName: string; lastName: string; listId?: string | null },
+  input: {
+    email: string;
+    firstName: string;
+    lastName: string;
+    listId?: string | null;
+    consentSource?: ConsentSource;
+    consentIp?: string;
+    consentUserAgent?: string;
+    consentNote?: string;
+  },
 ): Promise<{ created: boolean; status: string }> {
   const email = normalizeEmail(input.email);
   if (!isEmail(email)) throw new UserError("Enter a valid email.");
@@ -464,6 +474,15 @@ export async function addContact(
   }
   if (input.listId && id) {
     await sql.prepare(LINK_CONTACT).run(input.listId, id, now);
+  }
+  if (id && (created || input.consentSource)) {
+    await recordConsent(id, {
+      source: input.consentSource || "manual",
+      ip: input.consentIp,
+      userAgent: input.consentUserAgent,
+      note: input.consentNote,
+      confirmedAt: now,
+    });
   }
   const status = existing?.status ?? "subscribed";
   return { created, status };
@@ -515,7 +534,15 @@ export async function removeFromList(userId: string, listId: string, contactId: 
   await sql.prepare("DELETE FROM list_contacts WHERE list_id = ? AND contact_id = ?").run(listId, contactId);
 }
 
-export async function importContacts(userId: string, listId: string | null, csv: string): Promise<ImportResult> {
+export async function importContacts(
+  userId: string,
+  listId: string | null,
+  csv: string,
+  options: { consentAttested?: boolean; consentIp?: string; consentUserAgent?: string } = {},
+): Promise<ImportResult> {
+  if (!options.consentAttested) {
+    throw new UserError("Confirm that everyone on this CSV consented to receive your email before importing.");
+  }
   if (listId && !(await getList(userId, listId))) throw new UserError("List not found.");
   const parsed = readContactCsv(csv);
   const sql = await readySql();
@@ -535,6 +562,20 @@ export async function importContacts(userId: string, listId: string | null, csv:
     const insert = tx.prepare(INSERT_CONTACT);
     const update = tx.prepare(UPDATE_CONTACT_NAMES);
     const link = tx.prepare(LINK_CONTACT);
+    const consent = tx.prepare(
+      `INSERT INTO contact_consent (contact_id, source, consented_at, confirmed_at, ip, user_agent, note)
+       VALUES (?, 'import', ?, ?, ?, ?, ?)
+       ON CONFLICT (contact_id) DO UPDATE SET
+         source = 'import',
+         consented_at = excluded.consented_at,
+         confirmed_at = excluded.confirmed_at,
+         ip = excluded.ip,
+         user_agent = excluded.user_agent,
+         note = excluded.note`,
+    );
+    const note = "CSV import with consent attestation";
+    const ip = (options.consentIp || "").slice(0, 80);
+    const ua = (options.consentUserAgent || "").slice(0, 300);
     for (const contact of parsed.contacts) {
       if (blocked.has(contact.email)) {
         suppressed += 1;
@@ -552,6 +593,7 @@ export async function importContacts(userId: string, listId: string | null, csv:
         updated += 1;
         if (existing.status === "unsubscribed") keptUnsubscribed += 1;
       }
+      await consent.run(id, now, now, ip, ua, note);
       if (listId) {
         addedToList += await link.run(listId, id, now);
       }
@@ -570,20 +612,62 @@ export async function importContacts(userId: string, listId: string | null, csv:
 export async function contactsCsv(userId: string, listId: string | null): Promise<string | null> {
   if (listId && !(await getList(userId, listId))) return null;
   const sql = await readySql();
+  const select = `SELECT c.email, c.first_name, c.last_name, c.status,
+            cc.source AS consent_source, cc.consented_at, cc.confirmed_at, cc.ip AS consent_ip, cc.user_agent AS consent_user_agent, cc.note AS consent_note`;
   const rows = (await (listId
     ? sql
         .prepare(
-          `SELECT c.email, c.first_name, c.last_name, c.status
-           FROM contacts c JOIN list_contacts lc ON lc.contact_id = c.id
+          `${select}
+           FROM contacts c
+           JOIN list_contacts lc ON lc.contact_id = c.id
+           LEFT JOIN contact_consent cc ON cc.contact_id = c.id
            WHERE lc.list_id = ? AND c.user_id = ? ORDER BY c.email`,
         )
         .all(listId, userId)
     : sql
-        .prepare("SELECT email, first_name, last_name, status FROM contacts WHERE user_id = ? ORDER BY email")
-        .all(userId))) as { email: string; first_name: string; last_name: string; status: string }[];
+        .prepare(
+          `${select}
+           FROM contacts c
+           LEFT JOIN contact_consent cc ON cc.contact_id = c.id
+           WHERE c.user_id = ? ORDER BY c.email`,
+        )
+        .all(userId))) as {
+    email: string;
+    first_name: string;
+    last_name: string;
+    status: string;
+    consent_source: string | null;
+    consented_at: string | null;
+    confirmed_at: string | null;
+    consent_ip: string | null;
+    consent_user_agent: string | null;
+    consent_note: string | null;
+  }[];
   return toCsv([
-    ["email", "first_name", "last_name", "status"],
-    ...rows.map((row) => [row.email, row.first_name, row.last_name, row.status]),
+    [
+      "email",
+      "first_name",
+      "last_name",
+      "status",
+      "consent_source",
+      "consented_at",
+      "confirmed_at",
+      "consent_ip",
+      "consent_user_agent",
+      "consent_note",
+    ],
+    ...rows.map((row) => [
+      row.email,
+      row.first_name,
+      row.last_name,
+      row.status,
+      row.consent_source || "",
+      row.consented_at || "",
+      row.confirmed_at || "",
+      row.consent_ip || "",
+      row.consent_user_agent || "",
+      row.consent_note || "",
+    ]),
   ]);
 }
 

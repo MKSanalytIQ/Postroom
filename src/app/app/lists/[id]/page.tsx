@@ -3,7 +3,10 @@ import { notFound } from "next/navigation";
 import { ConfirmSubmit, Flash, Pager, Pill, SubmitButton } from "@/components/ui";
 import { addContactAction } from "@/lib/actions/contacts";
 import { deleteListAction, importCsvAction, removeMemberAction, renameListAction } from "@/lib/actions/lists";
+import { getListPublicSettings } from "@/lib/consent";
+import { rotateListPublicTokenAction, setListDoubleOptInAction } from "@/lib/actions/lists";
 import { getList, listMembers } from "@/lib/queries";
+import { requestOrigin } from "@/lib/origin";
 import { requireUser } from "@/lib/session";
 
 export const metadata: Metadata = { title: "List" };
@@ -23,6 +26,9 @@ export default async function ListDetailPage({
   const page = Number(query.page || 1);
   const members = await listMembers(user.id, id, page, query.q || "");
   if (!members) notFound();
+  const pub = await getListPublicSettings(user.id, id);
+  const origin = await requestOrigin();
+  const subscribeUrl = pub ? `${origin}/s/${pub.publicToken}` : "";
   return (
     <div className="stack">
       <Flash error={query.error} notice={query.notice} />
@@ -58,9 +64,39 @@ export default async function ListDetailPage({
           <p className="fine">Header row required. Use columns email, first name, and last name. Unsubscribed people stay unsubscribed.</p>
           <input type="hidden" name="listId" value={list.id} />
           <input name="file" type="file" accept=".csv,text/csv" required />
+          <label className="check">
+            <input type="checkbox" name="consentAttested" value="1" required />
+            I confirm everyone in this file consented to receive email from me.
+          </label>
           <SubmitButton pendingLabel="Importing…">Import</SubmitButton>
         </form>
       </div>
+      <section className="panel stack">
+        <h2>Public subscribe form</h2>
+        <p className="fine">
+          Share this link so people can join the list themselves. Consent is recorded with source &quot;form&quot;.
+          {pub?.doubleOptIn
+            ? " Double opt-in is on: they stay pending until they confirm by email."
+            : " They are subscribed as soon as they submit (turn on double opt-in if you need a confirmation email)."}
+        </p>
+        {subscribeUrl ? (
+          <label className="field">
+            <span>Subscribe URL</span>
+            <input readOnly value={subscribeUrl} aria-label="Public subscribe URL" />
+          </label>
+        ) : null}
+        <div className="action-row">
+          <form action={setListDoubleOptInAction}>
+            <input type="hidden" name="listId" value={list.id} />
+            <input type="hidden" name="enabled" value={pub?.doubleOptIn ? "0" : "1"} />
+            <SubmitButton className="btn btn-ghost">{pub?.doubleOptIn ? "Turn off double opt-in" : "Turn on double opt-in"}</SubmitButton>
+          </form>
+          <form action={rotateListPublicTokenAction}>
+            <input type="hidden" name="listId" value={list.id} />
+            <ConfirmSubmit label="New link" message="Generate a new subscribe link? The old URL will stop working." />
+          </form>
+        </div>
+      </section>
       <form action={`/app/lists/${list.id}`} method="get" className="inline-form">
         <input name="q" defaultValue={query.q || ""} placeholder="Search this list" aria-label="Search this list" style={{ maxWidth: 280 }} />
         <button className="btn btn-ghost" type="submit">

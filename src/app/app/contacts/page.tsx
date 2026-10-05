@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { ConfirmSubmit, Flash, PageHeader, Pager, Pill, SubmitButton } from "@/components/ui";
 import { addContactAction, deleteContactAction, setStatusAction } from "@/lib/actions/contacts";
 import { importCsvAction } from "@/lib/actions/lists";
+import { consentByContactIds } from "@/lib/consent";
 import { listContacts } from "@/lib/queries";
 import { requireUser } from "@/lib/session";
 
@@ -15,6 +16,7 @@ export default async function ContactsPage({
   const user = await requireUser();
   const query = await searchParams;
   const contacts = await listContacts(user.id, Number(query.page || 1), query.q || "");
+  const consentMap = await consentByContactIds(contacts.rows.map((row) => row.id));
   return (
     <div className="stack">
       <PageHeader
@@ -48,6 +50,10 @@ export default async function ContactsPage({
         </form>
         <form action={importCsvAction} className="panel stack">
           <h2>Import CSV</h2>
+          <label className="check">
+            <input type="checkbox" name="consentAttested" value="1" required />
+            I confirm everyone in this file consented to receive email from me.
+          </label>
           <p className="fine">Header row with an email column. Optional first name and last name. Up to 5,000 rows.</p>
           <input name="file" type="file" accept=".csv,text/csv" required />
           <SubmitButton pendingLabel="Importing…">Import</SubmitButton>
@@ -70,6 +76,7 @@ export default async function ContactsPage({
                 <th>Name</th>
                 <th>Lists</th>
                 <th>Status</th>
+                <th>Consent</th>
                 <th className="actions"> </th>
               </tr>
             </thead>
@@ -83,6 +90,14 @@ export default async function ContactsPage({
                   <td>{contact.listNames || "—"}</td>
                   <td>
                     <Pill status={contact.status} />
+                  </td>
+                  <td className="fine">
+                    {(() => {
+                      const consent = consentMap.get(contact.id);
+                      if (!consent) return "—";
+                      const when = consent.confirmedAt || consent.consentedAt;
+                      return `${consent.source}${consent.confirmedAt ? "" : consent.source === "form" ? " (unconfirmed)" : ""} · ${when.slice(0, 10)}`;
+                    })()}
                   </td>
                   <td className="actions">
                     <div className="row-actions">

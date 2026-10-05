@@ -1,5 +1,6 @@
 "use server";
 
+import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { addContact, deleteContact, setContactStatus } from "../queries";
 import { requireUser } from "../session";
@@ -11,11 +12,16 @@ export async function addContactAction(formData: FormData): Promise<void> {
   const listId = String(formData.get("listId") || "") || null;
   const back = listId ? `/app/lists/${listId}` : "/app/contacts";
   try {
+    const headerList = await headers();
     const result = await addContact(user.id, {
       email: String(formData.get("email") || ""),
       firstName: String(formData.get("firstName") || ""),
       lastName: String(formData.get("lastName") || ""),
       listId,
+      consentSource: "manual",
+      consentIp: headerList.get("x-real-ip")?.trim() || headerList.get("x-forwarded-for")?.split(",")[0]?.trim() || "",
+      consentUserAgent: headerList.get("user-agent")?.trim() || "",
+      consentNote: "Added in Postroom",
     });
     const message = result.created
       ? "Contact added."
