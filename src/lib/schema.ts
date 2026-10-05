@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS users (
   smtp_secure INTEGER NOT NULL DEFAULT 0,
   smtp_user TEXT NOT NULL DEFAULT '',
   smtp_pass TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  email_verified_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -106,7 +107,8 @@ CREATE TABLE IF NOT EXISTS events (
   recipient_id TEXT REFERENCES recipients(id) ON DELETE SET NULL,
   type TEXT NOT NULL,
   url TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  bot INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS deliveries (
@@ -319,6 +321,41 @@ CREATE TABLE IF NOT EXISTS worker_heartbeats (
   last_seen_at TEXT NOT NULL,
   detail TEXT NOT NULL DEFAULT ''
 );
+
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  id TEXT PRIMARY KEY,
+  applied_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS email_verification_tokens (
+  token_hash TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  used_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_email_verify_user ON email_verification_tokens(user_id);
+
+CREATE TABLE IF NOT EXISTS account_settings (
+  user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  timezone TEXT NOT NULL DEFAULT 'UTC',
+  soft_bounce_threshold INTEGER NOT NULL DEFAULT 3,
+  soft_bounce_window_days INTEGER NOT NULL DEFAULT 30,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS soft_bounce_events (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  email TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'smtp',
+  detail TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_soft_bounce_lookup ON soft_bounce_events(user_id, email, created_at);
 
 CREATE INDEX IF NOT EXISTS idx_suppressed_user ON suppressed_addresses(user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_events_recipient ON events(recipient_id, type);
