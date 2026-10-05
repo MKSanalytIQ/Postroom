@@ -16,6 +16,9 @@ Until SMTP is configured, Postroom runs in capture mode: each letter is stored o
 - A token-protected webhook for bounce and complaint events (Amazon SES through SNS, or a plain JSON format)
 - Sender verification: SPF, DKIM, and DMARC checks for your From domain
 - Campaign and automation reports with a per-day chart, top links, and CSV export
+- SMTP retries with exponential backoff for temporary failures
+- Password reset and change-password in Settings
+- Consent records, attested CSV import, and optional double opt-in subscribe forms
 
 SMS, a drag-and-drop builder, and a shared sending IP are not part of this version.
 
@@ -129,9 +132,30 @@ Limits to know about: bounces that arrive by webhook are counted as bounce event
 
 ### Storage and security notes
 
-Four tables are added, all created automatically on first start so existing databases need no manual step: `suppressed_addresses`, `deliverability_settings` (DKIM selector), `webhook_tokens` (the token hash, last four characters, and last use), and an index on `events(recipient_id, type)`. Nothing existing is altered.
+Additive tables (created automatically on first start): `suppressed_addresses`, `deliverability_settings`, `webhook_tokens`, `recipient_attempts`, `password_reset_tokens`, `contact_consent`, `list_settings`, `subscribe_confirmations`, plus indexes. Nothing existing is altered. Nothing existing is altered.
 
 Webhook tokens are 192 random bits and are stored only as a SHA-256 hash, looked up by hash and compared in constant time. If you upgraded from a version that stored the token as plain text (`deliverability_settings.webhook_token`), the first webhook request or Settings visit after the upgrade hashes it into `webhook_tokens` and erases the plaintext. The URL you already gave your provider keeps working. The token is still the only authentication for non-SNS senders, so use HTTPS, prefer the Bearer header, and make a new token if one leaks. Database backups taken before the upgrade still contain the old plaintext token.
+
+## Password reset
+
+From the sign-in page, **Forgot password** asks for an email and always shows the same confirmation (it does not say whether the account exists). If the account is real, Postroom emails a one-hour, single-use link. The token is stored only as a SHA-256 hash. Using it sets the new password and signs out every other session. Rate limits apply per email and per client address.
+
+In **Settings → Change password**, enter the current password and a new one (also signs out other sessions).
+
+Reset and confirmation mail use the **system SMTP** env vars above, not each account's campaign SMTP. Without `SYSTEM_SMTP_HOST`, the message is logged to the console so local development still works.
+
+## Consent and double opt-in
+
+Every contact can carry a consent record: source (`manual`, `import`, `form`, or `api`), timestamps, and optional IP / user-agent.
+
+- Adding a person in the app records source `manual`.
+- CSV import requires a checkbox attesting that everyone consented; the import is refused without it, and source `import` is stored.
+- Each list has a **public subscribe URL** (`/s/<token>`). Submissions record source `form`. Turn on **double opt-in** on the list to keep new people `pending` until they confirm via email (`confirmed_at`). Pending contacts are not mailed by campaigns or automations.
+- The contacts table and CSV export include consent columns.
+
+## SMTP retries
+
+Temporary SMTP problems (4xx replies, timeouts, connection errors) put the recipient back on the queue with exponential backoff (see `POSTROOM_RETRY_BASE_MS`), up to five attempts. Permanent recipient refusals (hard bounces) still suppress immediately. Other permanent errors (for example authentication failure) mark the recipient failed without suppressing.
 
 ## SMTP
 
@@ -156,6 +180,8 @@ Copy `.env.example` to `.env.local` if you want to set these. Local use works wi
 - `APP_ORIGIN` — public URL written into tracking and unsubscribe links. Leave unset locally and Postroom uses the request host.
 - `APP_SECRET` — encrypts SMTP passwords and signs click links. If unset, a secret is created in `data/app.secret`. Required on Vercel and any other host without a persistent disk.
 - `SEND_DELAY_MS` — pause between messages. Default 250.
+- `POSTROOM_RETRY_BASE_MS` — base delay for SMTP retry backoff in milliseconds. Default 60000 (doubles each attempt, capped at 30 minutes, up to 5 attempts).
+- `SYSTEM_SMTP_HOST` / `SYSTEM_SMTP_PORT` / `SYSTEM_SMTP_SECURE` / `SYSTEM_SMTP_USER` / `SYSTEM_SMTP_PASS` / `SYSTEM_SMTP_FROM` — app-level SMTP for password-reset and double opt-in confirmation mail. When `SYSTEM_SMTP_HOST` is unset, those messages are written to the server console (useful in development).
 
 ## Database
 
