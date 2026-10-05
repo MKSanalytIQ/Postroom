@@ -11,7 +11,7 @@
     "build": "next build",
     "start": "next start -p 3010",
     "lint": "eslint",
-    "test": "node --import tsx --test --test-concurrency=1 src/lib/csv.test.ts src/lib/render.test.ts src/lib/queue.test.ts src/lib/sql.test.ts src/lib/automations.test.ts src/lib/send-window.test.ts src/lib/automation-rules.test.ts src/lib/bounces.test.ts src/lib/deliverability.test.ts src/lib/dns-check.test.ts src/lib/chart.test.ts src/lib/reports.test.ts"
+    "test": "node --import tsx --test --test-concurrency=1 src/lib/csv.test.ts src/lib/render.test.ts src/lib/queue.test.ts src/lib/sql.test.ts src/lib/automations.test.ts src/lib/send-window.test.ts src/lib/automation-rules.test.ts src/lib/bounces.test.ts src/lib/deliverability.test.ts src/lib/dns-check.test.ts src/lib/chart.test.ts src/lib/reports.test.ts src/lib/cron-worker.test.ts"
   },
   "dependencies": {
     "@vercel/functions": "^3.9.9",
