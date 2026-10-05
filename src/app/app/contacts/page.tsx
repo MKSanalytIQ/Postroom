@@ -4,6 +4,8 @@ import { addContactAction, deleteContactAction, eraseContactAction, setStatusAct
 import { importCsvAction } from "@/lib/actions/lists";
 import { consentByContactIds } from "@/lib/consent";
 import { listContacts } from "@/lib/queries";
+import { listSoftBounceCounts } from "@/lib/soft-bounces";
+import { getAccountSettings } from "@/lib/account-settings";
 import { requireUser } from "@/lib/session";
 
 export const metadata: Metadata = { title: "Contacts" };
@@ -17,6 +19,8 @@ export default async function ContactsPage({
   const query = await searchParams;
   const contacts = await listContacts(user.id, Number(query.page || 1), query.q || "");
   const consentMap = await consentByContactIds(contacts.rows.map((row) => row.id));
+  const [softCounts, prefs] = await Promise.all([listSoftBounceCounts(user.id, 200), getAccountSettings(user.id)]);
+  const softByEmail = new Map(softCounts.map((row) => [row.email, row.count]));
   return (
     <div className="stack">
       <PageHeader
@@ -77,6 +81,7 @@ export default async function ContactsPage({
                 <th>Lists</th>
                 <th>Status</th>
                 <th>Consent</th>
+                <th>Soft bounces</th>
                 <th className="actions"> </th>
               </tr>
             </thead>
@@ -98,6 +103,11 @@ export default async function ContactsPage({
                       const when = consent.confirmedAt || consent.consentedAt;
                       return `${consent.source}${consent.confirmedAt ? "" : consent.source === "form" ? " (unconfirmed)" : ""} · ${when.slice(0, 10)}`;
                     })()}
+                  </td>
+                  <td className="fine">
+                    {softByEmail.has(contact.email)
+                      ? `${softByEmail.get(contact.email)}/${prefs.softBounceThreshold}`
+                      : "—"}
                   </td>
                   <td className="actions">
                     <div className="row-actions">
