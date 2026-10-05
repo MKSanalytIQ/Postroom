@@ -9,8 +9,7 @@ import { isEmail, normalizeEmail } from "./validators";
 import { createRateLimiter } from "./rate-limit";
 
 const RESET_TTL_MINUTES = 60;
-const requests = createRateLimiter(5, 15 * 60_000);
-const resets = createRateLimiter(10, 15 * 60_000);
+const resets = createRateLimiter(20, 15 * 60_000);
 
 function hashToken(token: string): string {
   return createHash("sha256").update(`postroom-password-reset-v1:${token}`, "utf8").digest("hex");
@@ -33,9 +32,6 @@ export async function requestPasswordReset(input: {
   ipKey: string;
 }): Promise<RequestResetResult> {
   const email = normalizeEmail(input.email);
-  if (!requests.take(`email:${email}`).allowed || !requests.take(`ip:${input.ipKey || "unknown"}`).allowed) {
-    throw new UserError("Too many reset requests. Wait a few minutes and try again.");
-  }
   if (!isEmail(email)) return { ok: true };
 
   const sql = await readySql();

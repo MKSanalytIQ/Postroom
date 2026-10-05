@@ -2,6 +2,8 @@
 
 import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
+import { assertAuthAllowed, clearAuthFailures, recordAuthFailure } from "../abuse";
+import { log } from "../log";
 import { requestOrigin } from "../origin";
 import { changePassword, requestPasswordReset, resetPasswordWithToken } from "../password-reset";
 import { createSession, createUser, deleteAccount, deleteSession, verifyPassword } from "../queries";
@@ -9,19 +11,8 @@ import { SESSION_COOKIE, requireUser, setSessionCookie } from "../session";
 import { UserError } from "../user-error";
 import { normalizeEmail, safeNext, withMessage } from "../validators";
 
-const attempts = new Map<string, { count: number; reset: number }>();
-
-function tooMany(email: string): boolean {
-  const now = Date.now();
-  const key = normalizeEmail(email);
-  const row = attempts.get(key);
-  if (!row || row.reset < now) {
-    attempts.set(key, { count: 1, reset: now + 15 * 60 * 1000 });
-    return false;
-  }
-  row.count += 1;
-  return row.count > 8;
-}
+const GENERIC_AUTH = "Email or password is wrong.";
+const GENERIC_LIMIT = "Too many attempts. Wait a few minutes and try again.";
 
 async function clientIp(): Promise<string> {
   const list = await headers();
@@ -30,13 +21,17 @@ async function clientIp(): Promise<string> {
 
 export async function signupAction(formData: FormData): Promise<void> {
   const next = safeNext(String(formData.get("next") || "/app"));
+  const email = String(formData.get("email") || "");
+  const ip = await clientIp();
   try {
+    await assertAuthAllowed("signup", { email, ip });
     const user = await createUser({
       name: String(formData.get("name") || ""),
-      email: String(formData.get("email") || ""),
+      email,
       password: String(formData.get("password") || ""),
     });
     await setSessionCookie(await createSession(user.id));
+    log.info("signup", { userId: user.id, ip });
   } catch (error) {
     if (error instanceof UserError) redirect(withMessage("/signup", "error", error.message));
     throw error;
@@ -47,13 +42,22 @@ export async function signupAction(formData: FormData): Promise<void> {
 export async function loginAction(formData: FormData): Promise<void> {
   const email = String(formData.get("email") || "");
   const next = safeNext(String(formData.get("next") || "/app"));
-  if (tooMany(email)) {
-    redirect(withMessage("/login", "error", "Too many sign-in attempts. Wait a few minutes and try again."));
+  const ip = await clientIp();
+  try {
+    await assertAuthAllowed("login", { email, ip });
+  } catch (error) {
+    if (error instanceof UserError) redirect(withMessage("/login", "error", GENERIC_LIMIT));
+    throw error;
   }
   const user = await verifyPassword(email, String(formData.get("password") || ""));
-  if (!user) redirect(withMessage(`/login?next=${encodeURIComponent(next)}`, "error", "Email or password is wrong."));
-  attempts.delete(normalizeEmail(email));
+  if (!user) {
+    await recordAuthFailure({ email, ip });
+    log.info("login_failed", { email: normalizeEmail(email), ip });
+    redirect(withMessage(`/login?next=${encodeURIComponent(next)}`, "error", GENERIC_AUTH));
+  }
+  await clearAuthFailures({ email, ip });
   await setSessionCookie(await createSession(user.id));
+  log.info("login", { userId: user.id, ip });
   redirect(next);
 }
 
@@ -69,6 +73,7 @@ export async function deleteAccountAction(): Promise<void> {
   const user = await requireUser();
   const jar = await cookies();
   const id = jar.get(SESSION_COOKIE)?.value;
+  log.info("account_deleted", { userId: user.id });
   await deleteAccount(user.id);
   if (id) await deleteSession(id);
   jar.delete(SESSION_COOKIE);
@@ -77,11 +82,14 @@ export async function deleteAccountAction(): Promise<void> {
 
 /** Always shows the same confirmation whether or not the email has an account. */
 export async function forgotPasswordAction(formData: FormData): Promise<void> {
+  const email = String(formData.get("email") || "");
+  const ip = await clientIp();
   try {
+    await assertAuthAllowed("forgot_password", { email, ip });
     await requestPasswordReset({
-      email: String(formData.get("email") || ""),
+      email,
       origin: await requestOrigin(),
-      ipKey: await clientIp(),
+      ipKey: ip,
     });
   } catch (error) {
     if (error instanceof UserError) redirect(withMessage("/forgot-password", "error", error.message));
@@ -123,7 +131,6 @@ export async function changePasswordAction(formData: FormData): Promise<void> {
     if (error instanceof UserError) redirect(withMessage("/app/settings#password", "error", error.message));
     throw error;
   }
-  // All sessions were revoked; sign in again on this device.
   await setSessionCookie(await createSession(user.id));
   redirect(withMessage("/app/settings#password", "notice", "Password changed. Other devices were signed out."));
 }

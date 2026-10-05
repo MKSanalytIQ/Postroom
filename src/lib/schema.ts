@@ -276,6 +276,50 @@ CREATE TABLE IF NOT EXISTS webhook_tokens (
   last_used_at TEXT
 );
 
+
+-- Cross-instance auth abuse controls (login / signup / forgot-password).
+CREATE TABLE IF NOT EXISTS rate_limit_buckets (
+  bucket_key TEXT NOT NULL,
+  window_start INTEGER NOT NULL,
+  count INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (bucket_key, window_start)
+);
+-- window_start is unix seconds (not ms) so it fits Postgres INTEGER.
+
+CREATE TABLE IF NOT EXISTS auth_lockouts (
+  lock_key TEXT PRIMARY KEY,
+  failures INTEGER NOT NULL DEFAULT 0,
+  locked_until TEXT,
+  updated_at TEXT NOT NULL
+);
+
+-- Per-account outbound send ceilings (campaigns + automations).
+CREATE TABLE IF NOT EXISTS send_limits (
+  user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  per_second INTEGER NOT NULL DEFAULT 2,
+  per_minute INTEGER NOT NULL DEFAULT 60,
+  per_hour INTEGER NOT NULL DEFAULT 1000,
+  per_day INTEGER NOT NULL DEFAULT 10000,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS send_counters (
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  bucket TEXT NOT NULL,
+  window_start TEXT NOT NULL,
+  count INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (user_id, bucket, window_start)
+);
+
+CREATE INDEX IF NOT EXISTS idx_send_counters_window ON send_counters(window_start);
+
+-- Last worker heartbeat (any process that runs runWorkerCycle).
+CREATE TABLE IF NOT EXISTS worker_heartbeats (
+  worker_id TEXT PRIMARY KEY,
+  last_seen_at TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT ''
+);
+
 CREATE INDEX IF NOT EXISTS idx_suppressed_user ON suppressed_addresses(user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_events_recipient ON events(recipient_id, type);
 `;
