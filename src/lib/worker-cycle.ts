@@ -3,6 +3,7 @@ import { composeEmail, formatAddress } from "./render";
 import { classifyDeliveryError } from "./bounces";
 import { runAutomationCycle } from "./automations";
 import { recordHardBounce, REASON_LABELS, suppressionReason } from "./deliverability";
+import { clearRecipientAttempts, scheduleTransientRetry } from "./retries";
 import {
   campaignIsSending,
   claimBatch,
@@ -93,6 +94,7 @@ async function processJob(job: SendJob): Promise<void> {
       });
     }
     await markRecipient(job.recipientId, "sent", "");
+    await clearRecipientAttempts(job.recipientId);
     if (process.env.POSTROOM_WORKER) {
       console.log(`${account.smtpConfigured ? "smtp" : "capture"} ${job.email}`);
     }
@@ -109,7 +111,17 @@ async function processJob(job: SendJob): Promise<void> {
       if (process.env.POSTROOM_WORKER) console.log(`bounced ${job.email}: ${failure.message}`);
       return;
     }
-    const message = error instanceof UserError || error instanceof Error ? error.message : "Send failed";
+    if (failure.kind === "transient") {
+      const retry = await scheduleTransientRetry(job.recipientId, failure.message);
+      if (retry.scheduled) {
+        if (process.env.POSTROOM_WORKER) console.log(`retry ${job.email} attempt ${retry.attemptCount} at ${retry.nextAttemptAt}`);
+        return;
+      }
+      await markRecipient(job.recipientId, "failed", `Gave up after ${retry.attemptCount} attempts: ${failure.message}`);
+      if (process.env.POSTROOM_WORKER) console.log(`failed ${job.email}: max retries`);
+      return;
+    }
+    const message = error instanceof UserError || error instanceof Error ? error.message : failure.message;
     await markRecipient(job.recipientId, "failed", message);
     if (process.env.POSTROOM_WORKER) console.log(`failed ${job.email}: ${message}`);
   }

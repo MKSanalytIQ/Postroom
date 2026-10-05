@@ -206,6 +206,57 @@ CREATE TABLE IF NOT EXISTS deliverability_settings (
 );
 
 CREATE INDEX IF NOT EXISTS idx_lists_user ON lists(user_id);
+
+-- Send retries: attempt count and when the recipient may be claimed again (additive; recipients table unchanged).
+CREATE TABLE IF NOT EXISTS recipient_attempts (
+  recipient_id TEXT PRIMARY KEY REFERENCES recipients(id) ON DELETE CASCADE,
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TEXT,
+  last_error TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_recipient_attempts_due ON recipient_attempts(next_attempt_at);
+
+-- Password reset tokens (SHA-256 hash of the secret; single-use, short-lived).
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+  token_hash TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  used_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_password_reset_user ON password_reset_tokens(user_id);
+
+-- Per-contact consent (source, when, optional double opt-in confirmation).
+CREATE TABLE IF NOT EXISTS contact_consent (
+  contact_id TEXT PRIMARY KEY REFERENCES contacts(id) ON DELETE CASCADE,
+  source TEXT NOT NULL,
+  consented_at TEXT NOT NULL,
+  confirmed_at TEXT,
+  ip TEXT NOT NULL DEFAULT '',
+  user_agent TEXT NOT NULL DEFAULT '',
+  note TEXT NOT NULL DEFAULT ''
+);
+
+-- Public subscribe forms and double opt-in settings per list (additive).
+CREATE TABLE IF NOT EXISTS list_settings (
+  list_id TEXT PRIMARY KEY REFERENCES lists(id) ON DELETE CASCADE,
+  public_token TEXT NOT NULL UNIQUE,
+  double_opt_in INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
+);
+
+-- Pending confirmation tokens for public subscribe (double opt-in).
+CREATE TABLE IF NOT EXISTS subscribe_confirmations (
+  token_hash TEXT PRIMARY KEY,
+  contact_id TEXT NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+  list_id TEXT NOT NULL REFERENCES lists(id) ON DELETE CASCADE,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  confirmed_at TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_contacts_user ON contacts(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_recipients_status ON recipients(campaign_id, status);
 CREATE INDEX IF NOT EXISTS idx_recipients_pending ON recipients(status, claimed_at);

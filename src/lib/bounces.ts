@@ -183,23 +183,51 @@ export function findSnsEnvelopes(body: unknown): Record<string, unknown>[] {
 }
 
 export type DeliveryFailure = {
-  kind: "hard_bounce" | "other";
+  /** hard_bounce: suppress the address. transient: retry with backoff. permanent: give up without suppressing. */
+  kind: "hard_bounce" | "transient" | "permanent";
   message: string;
 };
 
 // Permanent refusals that are about the sender, the message, or the server rather than the address.
 const NOT_THE_ADDRESS = /spam|block|black ?list|reputation|policy|relay|not verified|unverified|sender|authenticat|quota|\brate\b|\blimit|too large|\bsize\b|dmarc|spf|dkim|suspend|denied/i;
 
+const TRANSIENT_CODES = new Set([
+  "ETIMEDOUT",
+  "ESOCKETTIMEDOUT",
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "ECONNECTION",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "EPIPE",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ESOCKET",
+]);
+
 /**
- * Decides whether an SMTP error means "this recipient address is permanently undeliverable".
- * Only a 5xx refusal of the recipient counts. Authentication, connection, throttling (4xx),
- * and sender/policy problems are not the address's fault, so they stay ordinary failures.
+ * Classifies an SMTP/send error for the worker.
+ * - hard_bounce: permanent 5xx refusal of this recipient → suppress
+ * - transient: 4xx, greylisting, or connection/timeout → retry
+ * - permanent: auth/policy/other 5xx that are not the address → fail without suppressing
  */
 export function classifyDeliveryError(error: unknown): DeliveryFailure {
-  const info = (error ?? {}) as { message?: string; code?: string; responseCode?: number; response?: string; command?: string };
+  const info = (error ?? {}) as { message?: string; code?: string; responseCode?: number; response?: string; command?: string; errno?: string };
   const message = (info.message || info.response || "Send failed").toString().slice(0, 500);
-  const code = Number(info.responseCode);
-  if (!(code >= 500 && code < 600)) return { kind: "other", message };
+  const nodemailerCode = String(info.code || info.errno || "").toUpperCase();
+  const responseCode = Number(info.responseCode);
+
+  if (TRANSIENT_CODES.has(nodemailerCode) || /timed?\s*out|temporarily|try again|greylist|deferred|resources temporarily/i.test(message)) {
+    return { kind: "transient", message };
+  }
+  if (Number.isFinite(responseCode) && responseCode >= 400 && responseCode < 500) {
+    return { kind: "transient", message };
+  }
+  if (!(responseCode >= 500 && responseCode < 600)) {
+    // No SMTP response code and not a known connection error → treat as transient so flaky networks retry.
+    if (!Number.isFinite(responseCode) || responseCode === 0) return { kind: "transient", message };
+    return { kind: "permanent", message };
+  }
   const response = `${info.response ?? ""} ${info.message ?? ""}`;
   const enhanced = response.match(/\b5\.(\d{1,3})\.(\d{1,3})\b/);
   if (enhanced) {
@@ -207,9 +235,11 @@ export function classifyDeliveryError(error: unknown): DeliveryFailure {
     const detail = Number(enhanced[2]);
     // 5.1.x bad destination address; 5.2.1 mailbox disabled; 5.4.1 recipient address rejected.
     const addressProblem = subject === 1 || (subject === 2 && detail === 1) || (subject === 4 && detail === 1);
-    return { kind: addressProblem && !NOT_THE_ADDRESS.test(response) ? "hard_bounce" : "other", message };
+    if (addressProblem && !NOT_THE_ADDRESS.test(response)) return { kind: "hard_bounce", message };
+    return { kind: "permanent", message };
   }
   const refusedRecipient = info.code === "EENVELOPE" || /^RCPT/i.test(info.command ?? "");
-  const mailboxCode = code === 550 || code === 551 || code === 553;
-  return { kind: refusedRecipient && mailboxCode && !NOT_THE_ADDRESS.test(response) ? "hard_bounce" : "other", message };
+  const mailboxCode = responseCode === 550 || responseCode === 551 || responseCode === 553;
+  if (refusedRecipient && mailboxCode && !NOT_THE_ADDRESS.test(response)) return { kind: "hard_bounce", message };
+  return { kind: "permanent", message };
 }

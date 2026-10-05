@@ -977,19 +977,21 @@ export async function releaseStaleClaims(): Promise<void> {
 export async function claimBatch(limit: number): Promise<SendJob[]> {
   const sql = await readySql();
   const claimed = await sql.transaction(async (tx) => {
+    const now = nowIso();
     const ids = (await tx
       .prepare(
         `SELECT r.id FROM recipients r
          JOIN campaigns c ON c.id = r.campaign_id
+         LEFT JOIN recipient_attempts ra ON ra.recipient_id = r.id
          WHERE r.status = 'pending'
+           AND (ra.next_attempt_at IS NULL OR ra.next_attempt_at <= ?)
            AND (c.status = 'sending'
              OR (c.status = 'automation'
                  AND EXISTS (SELECT 1 FROM automations a WHERE a.campaign_id = c.id AND a.status = 'active')))
          ORDER BY r.created_at LIMIT ?`,
       )
-      .all(limit)) as { id: string }[];
+      .all(now, limit)) as { id: string }[];
     const claim = tx.prepare("UPDATE recipients SET status = 'sending', claimed_at = ? WHERE id = ? AND status = 'pending'");
-    const now = nowIso();
     const won: string[] = [];
     for (const row of ids) {
       if ((await claim.run(now, row.id)) === 1) won.push(row.id);
