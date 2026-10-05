@@ -162,7 +162,7 @@ test("the suppression list: add, normalize, search, export, remove", async () =>
       const manual = await addManualSuppressions(user.id, "a@example.com, B@example.com\nbounced@example.com; junk; a@example.com", "legal request");
       assert.deepEqual(manual, { added: 2, existing: 1, invalid: 1 });
       await assert.rejects(addManualSuppressions(user.id, "  ", ""), /at least one/);
-      assert.deepEqual(await suppressionCounts(user.id), { hard_bounce: 1, complaint: 0, manual: 2 });
+      assert.deepEqual(await suppressionCounts(user.id), { hard_bounce: 1, soft_bounce: 0, complaint: 0, manual: 2 });
 
       const all = await listSuppressions(user.id, 1, "");
       assert.equal(all.total, 3);

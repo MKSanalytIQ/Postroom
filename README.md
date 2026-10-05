@@ -15,12 +15,18 @@ Until SMTP is configured, Postroom runs in capture mode: each letter is stored o
 - Suppression list: hard bounces, spam complaints, and manual entries are never mailed again
 - A token-protected webhook for bounce and complaint events (Amazon SES through SNS, or a plain JSON format)
 - Sender verification: SPF, DKIM, and DMARC checks for your From domain
-- Campaign and automation reports with a per-day chart, top links, and CSV export
+- Campaign and automation reports with a per-day chart, top links, and CSV export (day buckets use the account timezone from Settings)
 - SMTP retries with exponential backoff for temporary failures
 - Password reset and change-password in Settings
 - Consent records, attested CSV import, and optional double opt-in subscribe forms
 - DB-backed login/signup rate limits and progressive lockout
 - Per-account send rate limits, security headers, health check, and GDPR export/erase
+- Email verification at signup (SYSTEM_SMTP_* or console in development)
+- Soft-bounce counters with configurable auto-suppress
+- Versioned database migrations (`npm run migrate`)
+- Account timezone for report day buckets
+- Scanner-click filtering for opens/clicks and exit-on-click
+- Overnight automation send windows (end hour ≤ start hour wraps past midnight)
 
 SMS, a drag-and-drop builder, and a shared sending IP are not part of this version.
 
@@ -58,9 +64,9 @@ How it behaves:
 
 Rules, set in the Rules panel on the automation page (they can be changed while it runs):
 
-- **Stop when someone clicks a link**: the first click on any link in the series ends that person's series. Some mail systems scan links automatically, and such a scan counts as a click.
+- **Stop when someone clicks a link**: the first *human* click on any link in the series ends that person's series. Likely scanner activity (known bot user-agents, HEAD requests, clicks within a few seconds of send, or several different links within about a second) is stored as a flagged event but does not stop the series or count toward unique clicks.
 - **Stop when someone joins another list**: for example a Customers list. It applies to people who join that list after they were enrolled; people already on it when they joined the trigger list carry on. Emails already queued for a stopped person are skipped.
-- **Send window**: pick the days of the week, a start and end hour (the end hour is exclusive, so 09:00 to 17:00 sends up to 16:59), and a timezone (UTC by default). An email that comes due outside the window waits for the next opening. Waits are not shifted. A window cannot run past midnight, so the end hour must be later than the start hour.
+- **Send window**: pick the days of the week, a start and end hour (the end hour is exclusive, so 09:00 to 17:00 sends up to 16:59), and a timezone (UTC by default). An email that comes due outside the window waits for the next opening. Waits are not shifted. When the end hour is earlier than or equal to the start hour, the window wraps past midnight (for example 22:00–06:00); include every calendar day that overnight stretch should cover.
 - **Per-step stats**: each email step shows how many were sent, opened and clicked (unique people, with the share of sent), plus any still waiting or failed. Opens rely on the tracking pixel, so they undercount where images are blocked.
 
 Rules live in their own table (`automation_settings`), created automatically on first start, so existing databases upgrade without any manual step. An automation with no rules row behaves exactly as before.
@@ -71,12 +77,16 @@ The send worker (`npm run worker`, started by `npm run dev`) moves automations f
 
 ### Suppressions
 
-Open **Suppressions** in the sidebar. Every account has its own list of addresses that must not be mailed, each with a reason: `hard bounce`, `complaint`, or `manual`. You can add addresses by hand (one or many), remove one, search, and download the list as CSV.
+Open **Suppressions** in the sidebar. Every account has its own list of addresses that must not be mailed, each with a reason: `hard bounce`, `soft bounce`, `complaint`, or `manual`. You can add addresses by hand (one or many), remove one, search, and download the list as CSV.
 
 - Campaigns and automations never send to a suppressed address. They are left out when a campaign is queued, skipped again at send time if they were suppressed after queueing (the recipient shows "Suppressed"), and automations stop an enrollment for that address.
 - CSV import skips suppressed addresses and says how many it skipped. Adding a single contact by hand with a suppressed address is refused too.
 - A complaint also unsubscribes the contact. Removing an address from the list does not resubscribe anyone.
 - The first reason stays: an address that is already listed keeps its original reason.
+
+### Soft bounces
+
+Temporary delivery problems (SMTP 4xx / connection errors after the retry budget is used up, and webhook soft/transient bounce events) are counted per address. In **Settings**, set how many soft bounces within how many days trigger an automatic `soft_bounce` suppression (default 3 in 30 days). Suppressions and the Suppressions page show the recent tallies.
 
 ### Hard bounces from the send worker
 
