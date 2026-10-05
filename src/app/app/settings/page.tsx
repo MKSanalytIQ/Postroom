@@ -2,8 +2,10 @@ import type { Metadata } from "next";
 import { ConfirmSubmit, Flash, PageHeader, Pill, SubmitButton } from "@/components/ui";
 import { changePasswordAction, deleteAccountAction } from "@/lib/actions/auth";
 import { checkSenderAction, clearWebhookTokenAction } from "@/lib/actions/deliverability";
-import { saveSettingsAction, testSmtpAction } from "@/lib/actions/settings";
+import { saveSendLimitsAction, saveSettingsAction, testSmtpAction } from "@/lib/actions/settings";
 import { getDeliverabilitySettings } from "@/lib/deliverability";
+import { latestWorkerHeartbeat } from "@/lib/heartbeat";
+import { getSendLimits } from "@/lib/send-limits";
 import { checkSender } from "@/lib/dns-check";
 import { requireUser } from "@/lib/session";
 import { WebhookTokenForm } from "@/components/webhook-token";
@@ -19,6 +21,8 @@ export default async function SettingsPage({
   const params = await searchParams;
   const deliverability = await getDeliverabilitySettings(user.id);
   const dkimSelector = deliverability.dkimSelector;
+  const sendLimits = await getSendLimits(user.id);
+  const worker = await latestWorkerHeartbeat();
   const senderAddress = user.fromEmail || user.email;
   const sender = params.check ? await checkSender(senderAddress, dkimSelector) : null;
   return (
@@ -166,6 +170,59 @@ export default async function SettingsPage({
             <ConfirmSubmit label="Turn off" message="Turn the webhook off? Bounce reports will stop being accepted." />
           </form>
         ) : null}
+      </section>
+      <section id="sending" className="panel stack">
+        <h2>Send rate limits</h2>
+        <p className="fine">
+          Caps how fast Postroom claims messages for this account (campaigns and automations). Defaults are conservative for shared SMTP.
+          Temporary retries still respect these ceilings.
+        </p>
+        <form action={saveSendLimitsAction} className="stack">
+          <div className="two">
+            <label className="field">
+              <span>Per second</span>
+              <input name="perSecond" type="number" min={1} max={50} defaultValue={sendLimits.perSecond} required />
+            </label>
+            <label className="field">
+              <span>Per minute</span>
+              <input name="perMinute" type="number" min={1} max={6000} defaultValue={sendLimits.perMinute} required />
+            </label>
+            <label className="field">
+              <span>Per hour</span>
+              <input name="perHour" type="number" min={1} max={100000} defaultValue={sendLimits.perHour} required />
+            </label>
+            <label className="field">
+              <span>Per day</span>
+              <input name="perDay" type="number" min={1} max={1000000} defaultValue={sendLimits.perDay} required />
+            </label>
+          </div>
+          <SubmitButton className="btn btn-ghost">Save send limits</SubmitButton>
+        </form>
+      </section>
+      <section id="worker" className="panel stack">
+        <h2>Worker</h2>
+        {worker ? (
+          <p className="fine">
+            Last heartbeat from <code>{worker.workerId}</code> at {worker.lastSeenAt.replace("T", " ").slice(0, 19)} UTC
+            {worker.stale ? " (stale — is npm run worker running?)" : " (fresh)"}.
+            {worker.detail ? ` Detail: ${worker.detail}.` : ""}
+          </p>
+        ) : (
+          <p className="fine">No worker heartbeat yet. Start <code>npm run worker</code> (or your cron worker) so queued mail can send.</p>
+        )}
+        <p className="fine">
+          Health check: <a href="/api/health">/api/health</a>
+        </p>
+      </section>
+      <section id="privacy" className="panel stack">
+        <h2>Privacy</h2>
+        <p className="fine">
+          Download a JSON copy of your account data (settings without SMTP password, contacts, consent, campaigns, events).
+          Per-contact export and erase are on the Contacts page.
+        </p>
+        <a className="btn btn-ghost" href="/app/privacy/export">
+          Download account data
+        </a>
       </section>
       <section id="password" className="panel stack">
         <h2>Change password</h2>

@@ -1,6 +1,7 @@
 "use server";
 
 import { redirect } from "next/navigation";
+import { saveSendLimits } from "../send-limits";
 import { smtpCredentials, updateSettings } from "../queries";
 import { requireUser } from "../session";
 import { verifySmtp } from "../send";
@@ -65,4 +66,20 @@ export async function testSmtpAction(formData: FormData): Promise<void> {
     redirect(withMessage("/app/settings", "error", message));
   }
   redirect(withMessage("/app/settings", "notice", "SMTP connection succeeded. Save settings if you have not yet."));
+}
+
+export async function saveSendLimitsAction(formData: FormData): Promise<void> {
+  const user = await requireUser();
+  try {
+    await saveSendLimits(user.id, {
+      perSecond: Number(formData.get("perSecond")),
+      perMinute: Number(formData.get("perMinute")),
+      perHour: Number(formData.get("perHour")),
+      perDay: Number(formData.get("perDay")),
+    });
+  } catch (error) {
+    if (error instanceof UserError) redirect(withMessage("/app/settings#sending", "error", error.message));
+    throw error;
+  }
+  redirect(withMessage("/app/settings#sending", "notice", "Send rate limits saved."));
 }

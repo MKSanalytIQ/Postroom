@@ -21,6 +21,7 @@ import type {
   Template,
 } from "./types";
 import { recordConsent, type ConsentSource } from "./consent";
+import { tryReserveSend } from "./send-limits";
 import { UserError } from "./user-error";
 import { isEmail, normalizeEmail, sendBlockers } from "./validators";
 
@@ -1060,28 +1061,33 @@ export async function releaseStaleClaims(): Promise<void> {
 
 export async function claimBatch(limit: number): Promise<SendJob[]> {
   const sql = await readySql();
-  const claimed = await sql.transaction(async (tx) => {
-    const now = nowIso();
-    const ids = (await tx
-      .prepare(
-        `SELECT r.id FROM recipients r
-         JOIN campaigns c ON c.id = r.campaign_id
-         LEFT JOIN recipient_attempts ra ON ra.recipient_id = r.id
-         WHERE r.status = 'pending'
-           AND (ra.next_attempt_at IS NULL OR ra.next_attempt_at <= ?)
-           AND (c.status = 'sending'
-             OR (c.status = 'automation'
-                 AND EXISTS (SELECT 1 FROM automations a WHERE a.campaign_id = c.id AND a.status = 'active')))
-         ORDER BY r.created_at LIMIT ?`,
-      )
-      .all(now, limit)) as { id: string }[];
-    const claim = tx.prepare("UPDATE recipients SET status = 'sending', claimed_at = ? WHERE id = ? AND status = 'pending'");
-    const won: string[] = [];
-    for (const row of ids) {
-      if ((await claim.run(now, row.id)) === 1) won.push(row.id);
-    }
-    return won;
-  });
+  const now = nowIso();
+  // Pull a wider candidate set so per-account send ceilings can skip some rows without starving the batch.
+  const candidates = (await sql
+    .prepare(
+      `SELECT r.id, c.user_id FROM recipients r
+       JOIN campaigns c ON c.id = r.campaign_id
+       LEFT JOIN recipient_attempts ra ON ra.recipient_id = r.id
+       WHERE r.status = 'pending'
+         AND (ra.next_attempt_at IS NULL OR ra.next_attempt_at <= ?)
+         AND (c.status = 'sending'
+           OR (c.status = 'automation'
+               AND EXISTS (SELECT 1 FROM automations a WHERE a.campaign_id = c.id AND a.status = 'active')))
+       ORDER BY r.created_at LIMIT ?`,
+    )
+    .all(now, Math.max(limit * 5, limit))) as { id: string; user_id: string }[];
+
+  const won: string[] = [];
+  for (const row of candidates) {
+    if (won.length >= limit) break;
+    // Enforce per-account send rate limits (second/minute/hour/day). Over-limit rows stay pending for a later cycle.
+    if (!(await tryReserveSend(row.user_id))) continue;
+    const claimed = await sql
+      .prepare("UPDATE recipients SET status = 'sending', claimed_at = ? WHERE id = ? AND status = 'pending'")
+      .run(now, row.id);
+    if (claimed === 1) won.push(row.id);
+  }
+  const claimed = won;
   if (claimed.length === 0) return [];
   const placeholders = claimed.map(() => "?").join(", ");
   const rows = await sql
