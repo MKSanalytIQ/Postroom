@@ -48,6 +48,7 @@ import { runBatch } from "./worker-cycle";
 
 process.env.APP_SECRET = "test-secret-test-secret-test-secret";
 process.env.SEND_DELAY_MS = "0";
+process.env.POSTROOM_RETRY_BASE_MS = "0";
 
 const SETTINGS = {
   name: "Ada Lovelace",
@@ -161,7 +162,7 @@ test("the suppression list: add, normalize, search, export, remove", async () =>
       const manual = await addManualSuppressions(user.id, "a@example.com, B@example.com\nbounced@example.com; junk; a@example.com", "legal request");
       assert.deepEqual(manual, { added: 2, existing: 1, invalid: 1 });
       await assert.rejects(addManualSuppressions(user.id, "  ", ""), /at least one/);
-      assert.deepEqual(await suppressionCounts(user.id), { hard_bounce: 1, complaint: 0, manual: 2 });
+      assert.deepEqual(await suppressionCounts(user.id), { hard_bounce: 1, soft_bounce: 0, complaint: 0, manual: 2 });
 
       const all = await listSuppressions(user.id, 1, "");
       assert.equal(all.total, 3);
@@ -196,7 +197,7 @@ test("suppressed addresses are skipped by imports, manual adds, and campaigns", 
     await addSuppression(user.id, "blocked@example.com", "hard_bounce");
 
     await assert.rejects(addContact(user.id, { email: "Blocked@example.com", firstName: "", lastName: "", listId }), /suppression list/);
-    const imported = await importContacts(user.id, listId, "email,first name\nblocked@example.com,Blocked\nnew@example.com,New\n");
+    const imported = await importContacts(user.id, listId, "email,first name\nblocked@example.com,Blocked\nnew@example.com,New\n", { consentAttested: true });
     assert.equal(imported.suppressed, 1);
     assert.equal(imported.created, 1);
     assert.equal(imported.addedToList, 1);
@@ -301,7 +302,9 @@ test("a permanent SMTP refusal marks the recipient bounced and suppresses the ad
       assert.equal(gone.status, "bounced");
       assert.match(gone.error, /User unknown/);
       assert.equal((await recipientRow("spammy@example.com")).status, "failed", "a policy refusal is not the address's fault");
-      assert.equal((await recipientRow("busy@example.com")).status, "failed", "a temporary error is not a bounce");
+      const busy = await recipientRow("busy@example.com");
+      assert.equal(busy.status, "pending", "a temporary error is retried, not marked failed");
+      assert.match(busy.error, /Retry 1/);
       assert.deepEqual(smtp.accepted, ["good@example.com"]);
 
       assert.equal(await suppressionReason(user.id, "gone@example.com"), "hard_bounce");
@@ -310,7 +313,8 @@ test("a permanent SMTP refusal marks the recipient bounced and suppresses the ad
       const listed = await listSuppressions(user.id, 1, "");
       assert.equal(listed.rows[0].source, "smtp");
       assert.equal(await count("SELECT COUNT(*) AS n FROM events WHERE campaign_id = ? AND type = 'bounce'", campaignId), 1);
-      assert.equal((await campaignStats(campaignId)).failed, 2);
+      assert.equal((await campaignStats(campaignId)).failed, 1);
+      assert.equal((await campaignStats(campaignId)).waiting, 1, "busy is still waiting to retry");
 
       // The next campaign leaves the bounced address out.
       const next = await campaignFor(user.id, listId, "Second");

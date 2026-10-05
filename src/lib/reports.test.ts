@@ -27,6 +27,7 @@ import { runBatch } from "./worker-cycle";
 
 process.env.APP_SECRET = "test-secret-test-secret-test-secret";
 process.env.SEND_DELAY_MS = "0";
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const SETTINGS = {
   name: "Ada Lovelace",
@@ -113,6 +114,7 @@ test("a campaign report counts sends, opens, clicks, bounces, complaints, and un
     await recordOpen(await token("a@example.com"));
     await recordOpen(await token("b@example.com"));
     await recordClick(await token("a@example.com"), "https://example.com/one");
+    await sleep(1100); // avoid multi-link scanner heuristic
     await recordClick(await token("a@example.com"), "https://example.com/two");
     await recordClick(await token("b@example.com"), "https://example.com/one");
     await unsubscribe(await unsubToken(user.id, "c@example.com"), campaignId);

@@ -1,4 +1,5 @@
 import postgres from "postgres";
+import { runMigrations } from "./migrations";
 import { SCHEMA } from "./schema";
 
 // One small async database interface for the whole app.
@@ -166,6 +167,7 @@ async function migrate(root: postgres.Sql): Promise<void> {
   await root.begin(async (tx) => {
     await tx.unsafe(`SELECT pg_advisory_xact_lock(${MIGRATION_LOCK})`);
     await tx.unsafe(SCHEMA).simple();
+    await runMigrations(postgresSql(tx, null));
   });
 }
 
@@ -200,8 +202,9 @@ function open(): State {
   };
   return {
     sql: lazy,
-    ready: loading.then((db) => {
+    ready: loading.then(async (db) => {
       sqlite = sqliteSql(db);
+      await runMigrations(sqlite);
     }),
     close: async () => {
       (await loading).resetDbForTests();

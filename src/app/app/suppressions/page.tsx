@@ -2,6 +2,8 @@ import type { Metadata } from "next";
 import { ConfirmSubmit, Flash, PageHeader, Pager, SubmitButton } from "@/components/ui";
 import { addSuppressionsAction, removeSuppressionAction } from "@/lib/actions/deliverability";
 import { listSuppressions, REASON_LABELS, suppressionCounts } from "@/lib/deliverability";
+import { listSoftBounceCounts } from "@/lib/soft-bounces";
+import { getAccountSettings } from "@/lib/account-settings";
 import { requireUser } from "@/lib/session";
 import { formatWhen } from "@/lib/time";
 
@@ -14,15 +16,17 @@ export default async function SuppressionsPage({
 }) {
   const user = await requireUser();
   const query = await searchParams;
-  const [suppressions, counts] = await Promise.all([
+  const [suppressions, counts, softCounts, prefs] = await Promise.all([
     listSuppressions(user.id, Number(query.page || 1), query.q || ""),
     suppressionCounts(user.id),
+    listSoftBounceCounts(user.id),
+    getAccountSettings(user.id),
   ]);
   return (
     <div className="stack">
       <PageHeader
         title="Suppressions"
-        lede="Addresses that are never mailed, by any campaign or automation. Hard bounces and spam complaints are added for you."
+        lede="Addresses that are never mailed, by any campaign or automation. Hard bounces, repeated soft bounces, and spam complaints are added for you."
         action={
           <a className="btn btn-ghost" href="/app/suppressions/export">
             Export CSV
@@ -36,6 +40,10 @@ export default async function SuppressionsPage({
           <span>Hard bounces</span>
         </div>
         <div className="stat">
+          <b>{counts.soft_bounce}</b>
+          <span>Soft bounces</span>
+        </div>
+        <div className="stat">
           <b>{counts.complaint}</b>
           <span>Complaints</span>
         </div>
@@ -44,6 +52,36 @@ export default async function SuppressionsPage({
           <span>Added by hand</span>
         </div>
       </section>
+      {softCounts.length > 0 ? (
+        <section className="panel stack">
+          <h2>Recent soft bounces</h2>
+          <p className="fine">
+            Counted within the last {prefs.softBounceWindowDays} days. Auto-suppress at {prefs.softBounceThreshold}.
+          </p>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Email</th>
+                  <th>Count</th>
+                  <th>Last</th>
+                </tr>
+              </thead>
+              <tbody>
+                {softCounts.map((row) => (
+                  <tr key={row.email}>
+                    <td>{row.email}</td>
+                    <td>
+                      {row.count}/{prefs.softBounceThreshold}
+                    </td>
+                    <td>{formatWhen(row.lastAt)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
       <form action={addSuppressionsAction} className="panel stack">
         <h2>Add addresses</h2>
         <label className="field">

@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS users (
   smtp_secure INTEGER NOT NULL DEFAULT 0,
   smtp_user TEXT NOT NULL DEFAULT '',
   smtp_pass TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  email_verified_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -106,7 +107,8 @@ CREATE TABLE IF NOT EXISTS events (
   recipient_id TEXT REFERENCES recipients(id) ON DELETE SET NULL,
   type TEXT NOT NULL,
   url TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  bot INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS deliveries (
@@ -206,6 +208,57 @@ CREATE TABLE IF NOT EXISTS deliverability_settings (
 );
 
 CREATE INDEX IF NOT EXISTS idx_lists_user ON lists(user_id);
+
+-- Send retries: attempt count and when the recipient may be claimed again (additive; recipients table unchanged).
+CREATE TABLE IF NOT EXISTS recipient_attempts (
+  recipient_id TEXT PRIMARY KEY REFERENCES recipients(id) ON DELETE CASCADE,
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TEXT,
+  last_error TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_recipient_attempts_due ON recipient_attempts(next_attempt_at);
+
+-- Password reset tokens (SHA-256 hash of the secret; single-use, short-lived).
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+  token_hash TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  used_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_password_reset_user ON password_reset_tokens(user_id);
+
+-- Per-contact consent (source, when, optional double opt-in confirmation).
+CREATE TABLE IF NOT EXISTS contact_consent (
+  contact_id TEXT PRIMARY KEY REFERENCES contacts(id) ON DELETE CASCADE,
+  source TEXT NOT NULL,
+  consented_at TEXT NOT NULL,
+  confirmed_at TEXT,
+  ip TEXT NOT NULL DEFAULT '',
+  user_agent TEXT NOT NULL DEFAULT '',
+  note TEXT NOT NULL DEFAULT ''
+);
+
+-- Public subscribe forms and double opt-in settings per list (additive).
+CREATE TABLE IF NOT EXISTS list_settings (
+  list_id TEXT PRIMARY KEY REFERENCES lists(id) ON DELETE CASCADE,
+  public_token TEXT NOT NULL UNIQUE,
+  double_opt_in INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
+);
+
+-- Pending confirmation tokens for public subscribe (double opt-in).
+CREATE TABLE IF NOT EXISTS subscribe_confirmations (
+  token_hash TEXT PRIMARY KEY,
+  contact_id TEXT NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+  list_id TEXT NOT NULL REFERENCES lists(id) ON DELETE CASCADE,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  confirmed_at TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_contacts_user ON contacts(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_recipients_status ON recipients(campaign_id, status);
 CREATE INDEX IF NOT EXISTS idx_recipients_pending ON recipients(status, claimed_at);
@@ -224,6 +277,85 @@ CREATE TABLE IF NOT EXISTS webhook_tokens (
   created_at TEXT NOT NULL,
   last_used_at TEXT
 );
+
+
+-- Cross-instance auth abuse controls (login / signup / forgot-password).
+CREATE TABLE IF NOT EXISTS rate_limit_buckets (
+  bucket_key TEXT NOT NULL,
+  window_start INTEGER NOT NULL,
+  count INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (bucket_key, window_start)
+);
+-- window_start is unix seconds (not ms) so it fits Postgres INTEGER.
+
+CREATE TABLE IF NOT EXISTS auth_lockouts (
+  lock_key TEXT PRIMARY KEY,
+  failures INTEGER NOT NULL DEFAULT 0,
+  locked_until TEXT,
+  updated_at TEXT NOT NULL
+);
+
+-- Per-account outbound send ceilings (campaigns + automations).
+CREATE TABLE IF NOT EXISTS send_limits (
+  user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  per_second INTEGER NOT NULL DEFAULT 2,
+  per_minute INTEGER NOT NULL DEFAULT 60,
+  per_hour INTEGER NOT NULL DEFAULT 1000,
+  per_day INTEGER NOT NULL DEFAULT 10000,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS send_counters (
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  bucket TEXT NOT NULL,
+  window_start TEXT NOT NULL,
+  count INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (user_id, bucket, window_start)
+);
+
+CREATE INDEX IF NOT EXISTS idx_send_counters_window ON send_counters(window_start);
+
+-- Last worker heartbeat (any process that runs runWorkerCycle).
+CREATE TABLE IF NOT EXISTS worker_heartbeats (
+  worker_id TEXT PRIMARY KEY,
+  last_seen_at TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT ''
+);
+
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  id TEXT PRIMARY KEY,
+  applied_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS email_verification_tokens (
+  token_hash TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  used_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_email_verify_user ON email_verification_tokens(user_id);
+
+CREATE TABLE IF NOT EXISTS account_settings (
+  user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  timezone TEXT NOT NULL DEFAULT 'UTC',
+  soft_bounce_threshold INTEGER NOT NULL DEFAULT 3,
+  soft_bounce_window_days INTEGER NOT NULL DEFAULT 30,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS soft_bounce_events (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  email TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'smtp',
+  detail TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_soft_bounce_lookup ON soft_bounce_events(user_id, email, created_at);
 
 CREATE INDEX IF NOT EXISTS idx_suppressed_user ON suppressed_addresses(user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_events_recipient ON events(recipient_id, type);

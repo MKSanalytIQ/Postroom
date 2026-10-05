@@ -13,6 +13,7 @@ export type Account = {
   smtpUser: string;
   smtpConfigured: boolean;
   hasSmtpPassword: boolean;
+  emailVerified: boolean;
   createdAt: string;
 };
 
@@ -226,7 +227,7 @@ export type StepStats = {
   uniqueClicks: number;
 };
 
-export type SuppressionReason = "hard_bounce" | "complaint" | "manual";
+export type SuppressionReason = "hard_bounce" | "soft_bounce" | "complaint" | "manual";
 
 export type Suppression = {
   id: string;

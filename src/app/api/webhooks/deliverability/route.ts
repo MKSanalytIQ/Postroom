@@ -1,4 +1,5 @@
 import { handleWebhook } from "@/lib/deliverability";
+import { log } from "@/lib/log";
 import { createRateLimiter } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
@@ -59,6 +60,7 @@ export async function POST(request: Request) {
   if (body === null) return Response.json({ ok: false, error: "Body too large." }, { status: 413 });
 
   const result = await handleWebhook(token, body);
+  log.info("webhook_deliverability", { status: result.status, ...(result.json as object) });
   if (result.status === 401 || result.status === 403) failures.take(key);
   if (result.confirmUrl) {
     // handleWebhook only hands back a link from a signature-verified SNS message, and only an

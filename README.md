@@ -15,7 +15,18 @@ Until SMTP is configured, Postroom runs in capture mode: each letter is stored o
 - Suppression list: hard bounces, spam complaints, and manual entries are never mailed again
 - A token-protected webhook for bounce and complaint events (Amazon SES through SNS, or a plain JSON format)
 - Sender verification: SPF, DKIM, and DMARC checks for your From domain
-- Campaign and automation reports with a per-day chart, top links, and CSV export
+- Campaign and automation reports with a per-day chart, top links, and CSV export (day buckets use the account timezone from Settings)
+- SMTP retries with exponential backoff for temporary failures
+- Password reset and change-password in Settings
+- Consent records, attested CSV import, and optional double opt-in subscribe forms
+- DB-backed login/signup rate limits and progressive lockout
+- Per-account send rate limits, security headers, health check, and GDPR export/erase
+- Email verification at signup (SYSTEM_SMTP_* or console in development)
+- Soft-bounce counters with configurable auto-suppress
+- Versioned database migrations (`npm run migrate`)
+- Account timezone for report day buckets
+- Scanner-click filtering for opens/clicks and exit-on-click
+- Overnight automation send windows (end hour ≤ start hour wraps past midnight)
 
 SMS, a drag-and-drop builder, and a shared sending IP are not part of this version.
 
@@ -53,9 +64,9 @@ How it behaves:
 
 Rules, set in the Rules panel on the automation page (they can be changed while it runs):
 
-- **Stop when someone clicks a link**: the first click on any link in the series ends that person's series. Some mail systems scan links automatically, and such a scan counts as a click.
+- **Stop when someone clicks a link**: the first *human* click on any link in the series ends that person's series. Likely scanner activity (known bot user-agents, HEAD requests, clicks within a few seconds of send, or several different links within about a second) is stored as a flagged event but does not stop the series or count toward unique clicks.
 - **Stop when someone joins another list**: for example a Customers list. It applies to people who join that list after they were enrolled; people already on it when they joined the trigger list carry on. Emails already queued for a stopped person are skipped.
-- **Send window**: pick the days of the week, a start and end hour (the end hour is exclusive, so 09:00 to 17:00 sends up to 16:59), and a timezone (UTC by default). An email that comes due outside the window waits for the next opening. Waits are not shifted. A window cannot run past midnight, so the end hour must be later than the start hour.
+- **Send window**: pick the days of the week, a start and end hour (the end hour is exclusive, so 09:00 to 17:00 sends up to 16:59), and a timezone (UTC by default). An email that comes due outside the window waits for the next opening. Waits are not shifted. When the end hour is earlier than or equal to the start hour, the window wraps past midnight (for example 22:00–06:00); include every calendar day that overnight stretch should cover.
 - **Per-step stats**: each email step shows how many were sent, opened and clicked (unique people, with the share of sent), plus any still waiting or failed. Opens rely on the tracking pixel, so they undercount where images are blocked.
 
 Rules live in their own table (`automation_settings`), created automatically on first start, so existing databases upgrade without any manual step. An automation with no rules row behaves exactly as before.
@@ -66,12 +77,16 @@ The send worker (`npm run worker`, started by `npm run dev`) moves automations f
 
 ### Suppressions
 
-Open **Suppressions** in the sidebar. Every account has its own list of addresses that must not be mailed, each with a reason: `hard bounce`, `complaint`, or `manual`. You can add addresses by hand (one or many), remove one, search, and download the list as CSV.
+Open **Suppressions** in the sidebar. Every account has its own list of addresses that must not be mailed, each with a reason: `hard bounce`, `soft bounce`, `complaint`, or `manual`. You can add addresses by hand (one or many), remove one, search, and download the list as CSV.
 
 - Campaigns and automations never send to a suppressed address. They are left out when a campaign is queued, skipped again at send time if they were suppressed after queueing (the recipient shows "Suppressed"), and automations stop an enrollment for that address.
 - CSV import skips suppressed addresses and says how many it skipped. Adding a single contact by hand with a suppressed address is refused too.
 - A complaint also unsubscribes the contact. Removing an address from the list does not resubscribe anyone.
 - The first reason stays: an address that is already listed keeps its original reason.
+
+### Soft bounces
+
+Temporary delivery problems (SMTP 4xx / connection errors after the retry budget is used up, and webhook soft/transient bounce events) are counted per address. In **Settings**, set how many soft bounces within how many days trigger an automatic `soft_bounce` suppression (default 3 in 30 days). Suppressions and the Suppressions page show the recent tallies.
 
 ### Hard bounces from the send worker
 
@@ -129,9 +144,53 @@ Limits to know about: bounces that arrive by webhook are counted as bounce event
 
 ### Storage and security notes
 
-Four tables are added, all created automatically on first start so existing databases need no manual step: `suppressed_addresses`, `deliverability_settings` (DKIM selector), `webhook_tokens` (the token hash, last four characters, and last use), and an index on `events(recipient_id, type)`. Nothing existing is altered.
+Additive tables (created automatically on first start): `suppressed_addresses`, `deliverability_settings`, `webhook_tokens`, `recipient_attempts`, `password_reset_tokens`, `contact_consent`, `list_settings`, `subscribe_confirmations`, plus indexes. Nothing existing is altered. Nothing existing is altered.
 
 Webhook tokens are 192 random bits and are stored only as a SHA-256 hash, looked up by hash and compared in constant time. If you upgraded from a version that stored the token as plain text (`deliverability_settings.webhook_token`), the first webhook request or Settings visit after the upgrade hashes it into `webhook_tokens` and erases the plaintext. The URL you already gave your provider keeps working. The token is still the only authentication for non-SNS senders, so use HTTPS, prefer the Bearer header, and make a new token if one leaks. Database backups taken before the upgrade still contain the old plaintext token.
+
+## Auth abuse controls
+
+Login, signup, and forgot-password share **database-backed** rate limits (per IP and per email) so they work across multiple app instances. Login also uses progressive lockouts after repeated failures (1 minute after 5 failures, then 5 / 15 / 60 minutes). Error messages stay generic ("Email or password is wrong" / "Too many attempts") so they do not reveal whether an account exists.
+
+## Send rate limits
+
+In **Settings → Send rate limits**, set per-second / minute / hour / day ceilings for this account. The worker consults them when claiming recipients (campaigns and automations). Defaults: 2/s, 60/min, 1000/hour, 10000/day. Over-limit messages stay `pending` for a later cycle and still honor retry backoff.
+
+## Privacy (GDPR)
+
+- **Per-contact Export** downloads JSON (profile, consent, lists, recipients, events, deliveries metadata).
+- **Erase** deletes the contact, anonymizes recipient/delivery PII (aggregates remain), skips pending sends, and **adds the original address to Suppressions** (plain email) so it cannot be re-imported and mailed. Documented here deliberately: suppression uses the real address for blocklist matching.
+- **Settings → Download account data** exports the whole account (no SMTP password).
+- **Delete account** remains a full wipe via foreign-key cascades.
+
+## Observability
+
+Workers and the send pipeline emit **structured JSON logs** (`ts`, `level`, `msg`, …) with secrets redacted. Set optional `SENTRY_DSN` and install `@sentry/node` yourself to forward errors; without it, logging alone is used. `GET /api/health` checks the database and returns the latest worker heartbeat. Settings shows the heartbeat and whether it looks stale.
+
+## Security headers
+
+`next.config.ts` sets CSP, `nosniff`, `Referrer-Policy`, `Permissions-Policy`, `X-Frame-Options: DENY` / `frame-ancestors 'none'`, and HSTS in production. Template previews keep using sandboxed `srcDoc` iframes. Tracking pixel, click, and unsubscribe routes are same-origin and continue to work.
+
+## Password reset
+
+From the sign-in page, **Forgot password** asks for an email and always shows the same confirmation (it does not say whether the account exists). If the account is real, Postroom emails a one-hour, single-use link. The token is stored only as a SHA-256 hash. Using it sets the new password and signs out every other session. Rate limits apply per email and per client address.
+
+In **Settings → Change password**, enter the current password and a new one (also signs out other sessions).
+
+Reset and confirmation mail use the **system SMTP** env vars above, not each account's campaign SMTP. Without `SYSTEM_SMTP_HOST`, the message is logged to the console so local development still works.
+
+## Consent and double opt-in
+
+Every contact can carry a consent record: source (`manual`, `import`, `form`, or `api`), timestamps, and optional IP / user-agent.
+
+- Adding a person in the app records source `manual`.
+- CSV import requires a checkbox attesting that everyone consented; the import is refused without it, and source `import` is stored.
+- Each list has a **public subscribe URL** (`/s/<token>`). Submissions record source `form`. Turn on **double opt-in** on the list to keep new people `pending` until they confirm via email (`confirmed_at`). Pending contacts are not mailed by campaigns or automations.
+- The contacts table and CSV export include consent columns.
+
+## SMTP retries
+
+Temporary SMTP problems (4xx replies, timeouts, connection errors) put the recipient back on the queue with exponential backoff (see `POSTROOM_RETRY_BASE_MS`), up to five attempts. Permanent recipient refusals (hard bounces) still suppress immediately. Other permanent errors (for example authentication failure) mark the recipient failed without suppressing.
 
 ## SMTP
 
@@ -156,6 +215,8 @@ Copy `.env.example` to `.env.local` if you want to set these. Local use works wi
 - `APP_ORIGIN` — public URL written into tracking and unsubscribe links. Leave unset locally and Postroom uses the request host.
 - `APP_SECRET` — encrypts SMTP passwords and signs click links. If unset, a secret is created in `data/app.secret`. Required on Vercel and any other host without a persistent disk.
 - `SEND_DELAY_MS` — pause between messages. Default 250.
+- `POSTROOM_RETRY_BASE_MS` — base delay for SMTP retry backoff in milliseconds. Default 60000 (doubles each attempt, capped at 30 minutes, up to 5 attempts).
+- `SYSTEM_SMTP_HOST` / `SYSTEM_SMTP_PORT` / `SYSTEM_SMTP_SECURE` / `SYSTEM_SMTP_USER` / `SYSTEM_SMTP_PASS` / `SYSTEM_SMTP_FROM` — app-level SMTP for password-reset and double opt-in confirmation mail. When `SYSTEM_SMTP_HOST` is unset, those messages are written to the server console (useful in development).
 
 ## Database
 

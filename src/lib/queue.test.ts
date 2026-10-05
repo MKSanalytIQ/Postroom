@@ -96,8 +96,7 @@ test("capture send skips unsubscribed people and records opens, clicks, and unsu
     const imported = await importContacts(
       user.id,
       listId,
-      "email,first name,last name\nada@example.com,Ada,Updated\nlinus@example.com,Linus,Torvalds\nnot-an-email,No,One\ngrace@example.com,Grace,Still\n",
-    );
+      "email,first name,last name\nada@example.com,Ada,Updated\nlinus@example.com,Linus,Torvalds\nnot-an-email,No,One\ngrace@example.com,Grace,Still\n", { consentAttested: true });
     assert.equal(imported.created, 1);
     assert.equal(imported.updated, 2);
     assert.equal(imported.invalid, 1);
@@ -209,7 +208,7 @@ test("lists, search, export, delete, and campaign state behave the same on every
     assert.equal(csv?.trim().split(/\r?\n/).length, 3);
     assert.equal(await contactsCsv(user.id, "missing"), null);
 
-    const reimport = await importContacts(user.id, readers, "email\nmixed.case@example.com\nnew@example.com\nNEW@example.com\n");
+    const reimport = await importContacts(user.id, readers, "email\nmixed.case@example.com\nnew@example.com\nNEW@example.com\n", { consentAttested: true });
     assert.equal(reimport.created, 1);
     assert.equal(reimport.updated, 1);
     assert.equal(reimport.addedToList, 1);

@@ -97,18 +97,21 @@ test("only a permanent refusal of the recipient counts as a hard bounce", () => 
   assert.equal(smtp(554, "554 5.1.2 Bad destination system address", "EMESSAGE").kind, "hard_bounce");
   assert.equal(smtp(550, "550 5.2.1 Mailbox disabled").kind, "hard_bounce");
   // The address is fine; the problem is the sender, the message, or the receiving policy.
-  assert.equal(smtp(550, "550 5.7.1 Message blocked as spam").kind, "other");
-  assert.equal(smtp(554, "554 Message rejected: Email address is not verified.", "EENVELOPE").kind, "other");
-  assert.equal(smtp(550, "550 Relay access denied").kind, "other");
-  assert.equal(smtp(550, "550 5.2.2 Mailbox full").kind, "other");
-  assert.equal(smtp(552, "552 Message size exceeds limit").kind, "other");
-  assert.equal(smtp(550, "550 Sender address rejected: not owned by user").kind, "other");
-  // Temporary, authentication, and connection problems are never bounces.
-  assert.equal(smtp(450, "450 4.2.0 Mailbox busy").kind, "other");
-  assert.equal(smtp(535, "535 5.7.8 Authentication failed", "EAUTH").kind, "other");
-  assert.equal(classifyDeliveryError(Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNECTION" })).kind, "other");
-  assert.equal(classifyDeliveryError("weird").kind, "other");
+  assert.equal(smtp(550, "550 5.7.1 Message blocked as spam").kind, "permanent");
+  assert.equal(smtp(554, "554 Message rejected: Email address is not verified.", "EENVELOPE").kind, "permanent");
+  assert.equal(smtp(550, "550 Relay access denied").kind, "permanent");
+  assert.equal(smtp(550, "550 5.2.2 Mailbox full").kind, "permanent");
+  assert.equal(smtp(552, "552 Message size exceeds limit").kind, "permanent");
+  assert.equal(smtp(550, "550 Sender address rejected: not owned by user").kind, "permanent");
+  // Temporary and connection problems are retried; auth failures are permanent (no suppress).
+  assert.equal(smtp(450, "450 4.2.0 Mailbox busy").kind, "transient");
+  assert.equal(smtp(421, "421 Try again later", "EPROTOCOL").kind, "transient");
+  assert.equal(smtp(535, "535 5.7.8 Authentication failed", "EAUTH").kind, "permanent");
+  assert.equal(classifyDeliveryError(Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNECTION" })).kind, "transient");
+  assert.equal(classifyDeliveryError("weird").kind, "transient");
   assert.equal(classifyDeliveryError(null).message, "Send failed");
+  assert.equal(classifyDeliveryError(null).kind, "transient");
+  assert.equal(smtp(550, "550 5.7.1 Relay denied").kind, "permanent", "policy 5xx is not a bounce");
 });
 
 test("only SNS envelopes in the verified set are trusted, and the finder sees the same places the parser does", () => {

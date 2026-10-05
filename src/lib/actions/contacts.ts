@@ -1,6 +1,8 @@
 "use server";
 
+import { headers } from "next/headers";
 import { redirect } from "next/navigation";
+import { eraseContact } from "../gdpr";
 import { addContact, deleteContact, setContactStatus } from "../queries";
 import { requireUser } from "../session";
 import { UserError } from "../user-error";
@@ -11,11 +13,16 @@ export async function addContactAction(formData: FormData): Promise<void> {
   const listId = String(formData.get("listId") || "") || null;
   const back = listId ? `/app/lists/${listId}` : "/app/contacts";
   try {
+    const headerList = await headers();
     const result = await addContact(user.id, {
       email: String(formData.get("email") || ""),
       firstName: String(formData.get("firstName") || ""),
       lastName: String(formData.get("lastName") || ""),
       listId,
+      consentSource: "manual",
+      consentIp: headerList.get("x-real-ip")?.trim() || headerList.get("x-forwarded-for")?.split(",")[0]?.trim() || "",
+      consentUserAgent: headerList.get("user-agent")?.trim() || "",
+      consentNote: "Added in Postroom",
     });
     const message = result.created
       ? "Contact added."
@@ -52,4 +59,16 @@ export async function deleteContactAction(formData: FormData): Promise<void> {
     throw error;
   }
   redirect(withMessage(back.startsWith("/app") ? back : "/app/contacts", "notice", "Contact deleted."));
+}
+
+export async function eraseContactAction(formData: FormData): Promise<void> {
+  const user = await requireUser();
+  const back = String(formData.get("back") || "/app/contacts");
+  try {
+    const result = await eraseContact(user.id, String(formData.get("id") || ""));
+    redirect(withMessage(back.startsWith("/app") ? back : "/app/contacts", "notice", `Erased ${result.email}. The address was added to Suppressions.`));
+  } catch (error) {
+    if (error instanceof UserError) redirect(withMessage("/app/contacts", "error", error.message));
+    throw error;
+  }
 }

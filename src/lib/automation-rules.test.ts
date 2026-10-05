@@ -156,7 +156,8 @@ test("rules default to off and can be saved, validated, and changed while runnin
     await assert.rejects(saveRules(user.id, id, { ...NO_RULES, exitListId: listId }), /different list/);
     await assert.rejects(saveRules(user.id, id, { ...NO_RULES, exitListId: "missing" }), /List not found/);
     await assert.rejects(saveRules(user.id, id, { ...NO_RULES, windowEnabled: true, windowDays: [] }), /at least one day/);
-    await assert.rejects(saveRules(user.id, id, { ...NO_RULES, windowEnabled: true, windowStartHour: 18 }), /end after/);
+    await saveRules(user.id, id, { ...NO_RULES, windowEnabled: true, windowStartHour: 22, windowEndHour: 6, windowDays: [1, 2] });
+    assert.equal((await getRules(user.id, id)).windowEndHour, 6);
     await assert.rejects(saveRules(user.id, id, { ...NO_RULES, windowEnabled: true, timezone: "Mars/Base" }), /timezone/);
 
     const input: RulesInput = {
@@ -240,14 +241,39 @@ test("clicking a link stops the series only when that exit condition is on", asy
       .prepare("SELECT status, error FROM recipients WHERE email = ? AND status = 'skipped'")
       .get("a@example.com")) as { status: string; error: string } | null;
     assert.equal(skipped?.error, "Left the automation");
-    assert.equal(await count("SELECT COUNT(*) AS n FROM deliveries WHERE to_email = ?", "a@example.com"), 1, "only email 1 reached A");
-    assert.equal(await count("SELECT COUNT(*) AS n FROM deliveries WHERE to_email = ?", "b@example.com"), 2);
+    assert.equal(
+      await count(
+        `SELECT COUNT(*) AS n FROM deliveries d JOIN recipients r ON r.id = d.recipient_id
+         JOIN campaigns c ON c.id = r.campaign_id WHERE c.user_id = ? AND d.to_email = ?`,
+        user.id,
+        "a@example.com",
+      ),
+      1,
+      "only email 1 reached A",
+    );
+    assert.equal(
+      await count(
+        `SELECT COUNT(*) AS n FROM deliveries d JOIN recipients r ON r.id = d.recipient_id
+         JOIN campaigns c ON c.id = r.campaign_id WHERE c.user_id = ? AND d.to_email = ?`,
+        user.id,
+        "b@example.com",
+      ),
+      2,
+    );
 
     // A stopped person gets nothing more.
     await fastForward(id);
     await runAutomationCycle();
     await runBatch(10);
-    assert.equal(await count("SELECT COUNT(*) AS n FROM deliveries WHERE to_email = ?", "a@example.com"), 1);
+    assert.equal(
+      await count(
+        `SELECT COUNT(*) AS n FROM deliveries d JOIN recipients r ON r.id = d.recipient_id
+         JOIN campaigns c ON c.id = r.campaign_id WHERE c.user_id = ? AND d.to_email = ?`,
+        user.id,
+        "a@example.com",
+      ),
+      1,
+    );
     const counts = await enrollmentCounts(id);
     assert.equal(counts.stopped, 1);
     assert.equal(counts.completed, 1);
@@ -320,7 +346,14 @@ test("email steps wait for the send window, delay steps do not", async () => {
     assert.equal(row.currentStep, 1);
     assert.equal(row.nextRunAt, expected?.toISOString());
     assert.ok(new Date(row.nextRunAt).getTime() > Date.now());
-    assert.equal(await count("SELECT COUNT(*) AS n FROM recipients"), 0, "nothing queued outside the window");
+    assert.equal(
+      await count(
+        `SELECT COUNT(*) AS n FROM recipients r JOIN campaigns c ON c.id = r.campaign_id WHERE c.user_id = ?`,
+        user.id,
+      ),
+      0,
+      "nothing queued outside the window",
+    );
     assert.equal(await runAutomationCycle(), 0, "and nothing happens until the window opens");
 
     // Open the window (every day) and the same step goes out.

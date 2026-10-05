@@ -1,6 +1,7 @@
 import { newId, newToken } from "./crypto";
 import { getAccount, getList, getTemplate, skipQueuedForStoppedEnrollments } from "./queries";
 import { DEFAULT_TIMEZONE, isValidTimeZone, nextAllowedTime, parseDays, serializeDays, validateWindow, type SendWindow } from "./send-window";
+import { requireEmailVerified } from "./email-verification";
 import { readySql, type Sql } from "./sql";
 import { addMinutesIso, nowIso } from "./time";
 import type {
@@ -280,6 +281,7 @@ export async function moveStep(userId: string, automationId: string, stepId: str
 // ---------- status ----------
 
 export async function activateAutomation(userId: string, id: string, origin: string): Promise<void> {
+  await requireEmailVerified(userId);
   const automation = await requireAutomation(userId, id);
   if (automation.status === "active") throw new UserError("This automation is already active.");
   if (!automation.listId) throw new UserError("Choose a list for the trigger.");

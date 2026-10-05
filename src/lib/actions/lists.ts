@@ -1,6 +1,8 @@
 "use server";
 
+import { headers } from "next/headers";
 import { redirect } from "next/navigation";
+import { rotateListPublicToken, setListDoubleOptIn } from "../consent";
 import { createList, deleteList, importContacts, removeFromList, renameList } from "../queries";
 import { requireUser } from "../session";
 import { UserError } from "../user-error";
@@ -51,8 +53,18 @@ export async function importCsvAction(formData: FormData): Promise<void> {
     redirect(withMessage(back, "error", "Choose a CSV file."));
   }
   if (file.size > 2_000_000) redirect(withMessage(back, "error", "CSV files must be under 2 MB."));
+  if (formData.get("consentAttested") !== "1") {
+    redirect(withMessage(back, "error", "Tick the box confirming these people consented to receive your email."));
+  }
+  const headerList = await headers();
+  const ip = headerList.get("x-real-ip")?.trim() || headerList.get("x-forwarded-for")?.split(",")[0]?.trim() || "";
+  const ua = headerList.get("user-agent")?.trim() || "";
   try {
-    const result = await importContacts(user.id, listId, await file.text());
+    const result = await importContacts(user.id, listId, await file.text(), {
+      consentAttested: true,
+      consentIp: ip,
+      consentUserAgent: ua,
+    });
     const parts = [
       `${result.created} new`,
       `${result.updated} updated`,
@@ -66,4 +78,28 @@ export async function importCsvAction(formData: FormData): Promise<void> {
     if (error instanceof UserError) redirect(withMessage(back, "error", error.message));
     throw error;
   }
+}
+
+export async function setListDoubleOptInAction(formData: FormData): Promise<void> {
+  const user = await requireUser();
+  const listId = String(formData.get("listId") || "");
+  try {
+    await setListDoubleOptIn(user.id, listId, formData.get("enabled") === "1");
+  } catch (error) {
+    if (error instanceof UserError) redirect(withMessage(`/app/lists/${listId}`, "error", error.message));
+    throw error;
+  }
+  redirect(withMessage(`/app/lists/${listId}`, "notice", formData.get("enabled") === "1" ? "Double opt-in is on." : "Double opt-in is off."));
+}
+
+export async function rotateListPublicTokenAction(formData: FormData): Promise<void> {
+  const user = await requireUser();
+  const listId = String(formData.get("listId") || "");
+  try {
+    await rotateListPublicToken(user.id, listId);
+  } catch (error) {
+    if (error instanceof UserError) redirect(withMessage(`/app/lists/${listId}`, "error", error.message));
+    throw error;
+  }
+  redirect(withMessage(`/app/lists/${listId}`, "notice", "New subscribe link created. Update anywhere you shared the old one."));
 }

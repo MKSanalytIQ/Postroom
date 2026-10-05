@@ -35,7 +35,7 @@ export function Pill({ status }: { status: string }) {
       ? "good"
       : status === "failed" || status === "unsubscribed" || status === "bounced" || status === "missing"
         ? "bad"
-        : status === "sending" || status === "paused" || status === "stopped" || status === "warn"
+        : status === "sending" || status === "paused" || status === "stopped" || status === "warn" || status === "pending"
           ? "warn"
           : "";
   return <span className={`pill ${tone}`}>{status}</span>;

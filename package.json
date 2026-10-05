@@ -11,13 +11,14 @@
     "build": "next build",
     "start": "next start -p 3010",
     "lint": "eslint",
-    "test": "node --import tsx --test --test-concurrency=1 src/lib/csv.test.ts src/lib/render.test.ts src/lib/queue.test.ts src/lib/sql.test.ts src/lib/automations.test.ts src/lib/send-window.test.ts src/lib/automation-rules.test.ts src/lib/bounces.test.ts src/lib/deliverability.test.ts src/lib/dns-check.test.ts src/lib/chart.test.ts src/lib/reports.test.ts src/lib/sns.test.ts src/lib/rate-limit.test.ts src/lib/webhook-security.test.ts"
+    "test": "POSTROOM_DISABLE_SEND_LIMITS=1 POSTROOM_AUTO_VERIFY=1 POSTROOM_SCANNER_IMMEDIATE_SECONDS=0 node --import tsx --test --test-concurrency=1 src/lib/csv.test.ts src/lib/render.test.ts src/lib/queue.test.ts src/lib/sql.test.ts src/lib/automations.test.ts src/lib/send-window.test.ts src/lib/automation-rules.test.ts src/lib/bounces.test.ts src/lib/deliverability.test.ts src/lib/dns-check.test.ts src/lib/chart.test.ts src/lib/reports.test.ts src/lib/sns.test.ts src/lib/rate-limit.test.ts src/lib/webhook-security.test.ts src/lib/retries.test.ts src/lib/password-reset.test.ts src/lib/consent.test.ts src/lib/abuse.test.ts src/lib/send-limits.test.ts src/lib/gdpr.test.ts src/lib/log.test.ts src/lib/heartbeat.test.ts src/lib/email-verification.test.ts src/lib/soft-bounces.test.ts src/lib/scanner.test.ts src/lib/migrations.test.ts",
+    "migrate": "tsx scripts/migrate.ts"
   },
   "dependencies": {
     "@vercel/functions": "^3.9.9",
     "bcryptjs": "^2.4.3",
-    "next": "16.2.12",
-    "nodemailer": "^7.0.6",
+    "next": "16.3.8",
+    "nodemailer": "10.0.15",
     "postgres": "^3.4.9",
     "react": "19.2.4",
     "react-dom": "19.2.4"
@@ -26,12 +27,12 @@
     "@tailwindcss/postcss": "^4",
     "@types/bcryptjs": "^2.4.6",
     "@types/node": "^24",
-    "@types/nodemailer": "^6.4.17",
+    "@types/nodemailer": "^8.0.2",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "concurrently": "^9.2.1",
     "eslint": "^9",
-    "eslint-config-next": "16.2.12",
+    "eslint-config-next": "16.3.8",
     "tailwindcss": "^4",
     "tsx": "^4.20.5",
     "typescript": "^5"

@@ -1,4 +1,6 @@
 import { toCsv } from "./csv";
+import { getAccountSettings } from "./account-settings";
+import { DEFAULT_TIMEZONE, isValidTimeZone } from "./send-window";
 import { readySql } from "./sql";
 
 // Campaign and automation reports. An automation's mail is stored under its own hidden campaign,
@@ -28,7 +30,7 @@ export type ReportTotals = {
 export type ReportRates = { open: number; click: number; bounce: number; complaint: number; unsubscribe: number; delivered: number | null };
 
 export type DayPoint = {
-  /** UTC date, YYYY-MM-DD. */
+  /** Calendar date YYYY-MM-DD in the account timezone. */
   date: string;
   sent: number;
   opens: number;
@@ -74,13 +76,28 @@ export async function ownsCampaign(userId: string, campaignId: string): Promise<
   return Boolean(await sql.prepare("SELECT 1 AS found FROM campaigns WHERE id = ? AND user_id = ?").get(campaignId, userId));
 }
 
-function addDays(date: string, days: number): string {
-  const d = new Date(`${date}T00:00:00.000Z`);
+
+/** Calendar date YYYY-MM-DD in the given IANA timezone. */
+export function dateInTimeZone(iso: string, timezone: string): string {
+  const date = new Date(iso);
+  if (!Number.isFinite(date.getTime())) return iso.slice(0, 10);
+  const zone = isValidTimeZone(timezone) ? timezone : DEFAULT_TIMEZONE;
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: zone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(date);
+}
+
+function addCalendarDay(date: string, days: number): string {
+  const d = new Date(`${date}T12:00:00.000Z`);
   d.setUTCDate(d.getUTCDate() + days);
   return d.toISOString().slice(0, 10);
 }
 
-export async function buildReport(campaignId: string): Promise<Report> {
+export async function buildReport(campaignId: string, timezone?: string): Promise<Report> {
+  const zone = timezone && isValidTimeZone(timezone) ? timezone : DEFAULT_TIMEZONE;
   const sql = await readySql();
   const r = ((await sql
     .prepare(
@@ -134,7 +151,7 @@ export async function buildReport(campaignId: string): Promise<Report> {
     delivered: totals.delivered === null ? null : ratio(totals.delivered, sent),
   };
 
-  // Per-day series (UTC). Unique opens and clicks are counted on the day of the first one.
+  // Per-day series in the account timezone. Unique opens/clicks use first human open/click.
   const perDay = new Map<string, DayPoint>();
   const point = (date: string): DayPoint => {
     let entry = perDay.get(date);
@@ -144,47 +161,52 @@ export async function buildReport(campaignId: string): Promise<Report> {
     }
     return entry;
   };
-  const tally = async (query: string, apply: (entry: DayPoint, n: number, row: Row) => void) => {
-    for (const row of (await sql.prepare(query).all(campaignId)) as Row[]) {
-      if (row.d) apply(point(String(row.d)), num(row.n), row);
-    }
+  const bump = (iso: string | null | undefined, apply: (entry: DayPoint) => void) => {
+    if (!iso) return;
+    apply(point(dateInTimeZone(String(iso), zone)));
   };
-  await tally(
-    "SELECT SUBSTR(sent_at, 1, 10) AS d, COUNT(*) AS n FROM recipients WHERE campaign_id = ? AND status = 'sent' AND sent_at IS NOT NULL GROUP BY SUBSTR(sent_at, 1, 10)",
-    (entry, n) => (entry.sent += n),
-  );
-  await tally(
-    "SELECT SUBSTR(opened_at, 1, 10) AS d, COUNT(*) AS n FROM recipients WHERE campaign_id = ? AND opened_at IS NOT NULL GROUP BY SUBSTR(opened_at, 1, 10)",
-    (entry, n) => (entry.opens += n),
-  );
-  await tally(
-    "SELECT SUBSTR(clicked_at, 1, 10) AS d, COUNT(*) AS n FROM recipients WHERE campaign_id = ? AND clicked_at IS NOT NULL GROUP BY SUBSTR(clicked_at, 1, 10)",
-    (entry, n) => (entry.clicks += n),
-  );
-  await tally(
-    `SELECT SUBSTR(created_at, 1, 10) AS d, type, COUNT(*) AS n FROM events
-     WHERE campaign_id = ? AND type IN ('bounce', 'complaint', 'unsubscribe') GROUP BY SUBSTR(created_at, 1, 10), type`,
-    (entry, n, row) => {
-      if (row.type === "bounce") entry.bounces += n;
-      else if (row.type === "complaint") entry.complaints += n;
-      else entry.unsubscribes += n;
-    },
-  );
+  for (const row of (await sql
+    .prepare("SELECT sent_at FROM recipients WHERE campaign_id = ? AND status = 'sent' AND sent_at IS NOT NULL")
+    .all(campaignId)) as Row[]) {
+    bump(row.sent_at as string, (entry) => (entry.sent += 1));
+  }
+  for (const row of (await sql
+    .prepare("SELECT opened_at FROM recipients WHERE campaign_id = ? AND opened_at IS NOT NULL")
+    .all(campaignId)) as Row[]) {
+    bump(row.opened_at as string, (entry) => (entry.opens += 1));
+  }
+  for (const row of (await sql
+    .prepare("SELECT clicked_at FROM recipients WHERE campaign_id = ? AND clicked_at IS NOT NULL")
+    .all(campaignId)) as Row[]) {
+    bump(row.clicked_at as string, (entry) => (entry.clicks += 1));
+  }
+  for (const row of (await sql
+    .prepare(
+      `SELECT created_at, type FROM events
+       WHERE campaign_id = ? AND type IN ('bounce', 'complaint', 'unsubscribe')`,
+    )
+    .all(campaignId)) as Row[]) {
+    bump(row.created_at as string, (entry) => {
+      if (row.type === "bounce") entry.bounces += 1;
+      else if (row.type === "complaint") entry.complaints += 1;
+      else entry.unsubscribes += 1;
+    });
+  }
   const dates = [...perDay.keys()].sort();
   const days: DayPoint[] = [];
   if (dates.length > 0) {
     const last = dates[dates.length - 1];
     let day = dates[0];
-    // A long-running automation could span years: show the most recent stretch.
-    const first = addDays(last, -(MAX_DAYS - 1));
+    const first = addCalendarDay(last, -(MAX_DAYS - 1));
     if (day < first) day = first;
-    for (; day <= last; day = addDays(day, 1)) days.push(perDay.get(day) ?? point(day));
+    for (; day <= last; day = addCalendarDay(day, 1)) days.push(perDay.get(day) ?? point(day));
   }
 
   const linkRows = (await sql
     .prepare(
       `SELECT url, COUNT(*) AS clicks, COUNT(DISTINCT recipient_id) AS people FROM events
-       WHERE campaign_id = ? AND type = 'click' AND url != '' GROUP BY url ORDER BY clicks DESC, url LIMIT 10`,
+       WHERE campaign_id = ? AND type = 'click' AND url != '' AND bot = 0
+       GROUP BY url ORDER BY clicks DESC, url LIMIT 10`,
     )
     .all(campaignId)) as Row[];
   const links = linkRows.map((row) => ({ url: String(row.url), clicks: num(row.clicks), people: num(row.people) }));
@@ -258,4 +280,10 @@ export async function reportCsv(report: Report, kind: ReportKind): Promise<strin
     ["skipped", String(totals.skipped), ""],
     ["waiting", String(totals.waiting), ""],
   ]);
+}
+
+/** Builds a report using the account timezone from Settings. */
+export async function buildReportForUser(userId: string, campaignId: string): Promise<Report> {
+  const settings = await getAccountSettings(userId);
+  return buildReport(campaignId, settings.timezone);
 }

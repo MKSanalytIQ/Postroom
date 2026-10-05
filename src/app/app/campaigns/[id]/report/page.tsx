@@ -4,7 +4,7 @@ import { notFound } from "next/navigation";
 import { ReportView } from "@/components/report";
 import { Pill } from "@/components/ui";
 import { getCampaign } from "@/lib/queries";
-import { buildReport } from "@/lib/reports";
+import { buildReportForUser } from "@/lib/reports";
 import { requireUser } from "@/lib/session";
 
 export const metadata: Metadata = { title: "Campaign report" };
@@ -14,7 +14,7 @@ export default async function CampaignReportPage({ params }: { params: Promise<{
   const { id } = await params;
   const campaign = await getCampaign(user.id, id);
   if (!campaign) notFound();
-  const report = await buildReport(campaign.id);
+  const report = await buildReportForUser(user.id, campaign.id);
   return (
     <div className="stack">
       <p className="fine">

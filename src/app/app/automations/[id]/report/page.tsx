@@ -4,7 +4,7 @@ import { notFound } from "next/navigation";
 import { ReportView } from "@/components/report";
 import { Pill } from "@/components/ui";
 import { getAutomation } from "@/lib/automations";
-import { buildReport } from "@/lib/reports";
+import { buildReportForUser } from "@/lib/reports";
 import { requireUser } from "@/lib/session";
 
 export const metadata: Metadata = { title: "Automation report" };
@@ -14,7 +14,7 @@ export default async function AutomationReportPage({ params }: { params: Promise
   const { id } = await params;
   const automation = await getAutomation(user.id, id);
   if (!automation) notFound();
-  const report = await buildReport(automation.campaignId);
+  const report = await buildReportForUser(user.id, automation.campaignId);
   return (
     <div className="stack">
       <p className="fine">

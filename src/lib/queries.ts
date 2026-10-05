@@ -20,6 +20,10 @@ import type {
   SettingsInput,
   Template,
 } from "./types";
+import { recordConsent, type ConsentSource } from "./consent";
+import { tryReserveSend } from "./send-limits";
+import { requireEmailVerified } from "./email-verification";
+import { classifyTracking, type TrackMeta } from "./scanner";
 import { UserError } from "./user-error";
 import { isEmail, normalizeEmail, sendBlockers } from "./validators";
 
@@ -60,10 +64,11 @@ type UserRow = {
   smtp_user: string;
   smtp_pass: string;
   created_at: string;
+  email_verified_at: string | null;
 };
 
 const USER_COLUMNS = `id, email, password_hash, name, company_name, postal_address, from_name, from_email, reply_to,
-  smtp_host, smtp_port, smtp_secure, smtp_user, smtp_pass, created_at`;
+  smtp_host, smtp_port, smtp_secure, smtp_user, smtp_pass, created_at, email_verified_at`;
 
 function toAccount(row: UserRow): Account {
   return {
@@ -81,6 +86,7 @@ function toAccount(row: UserRow): Account {
     smtpUser: row.smtp_user,
     smtpConfigured: row.smtp_host.trim() !== "",
     hasSmtpPassword: row.smtp_pass.trim() !== "",
+    emailVerified: Boolean(row.email_verified_at),
     createdAt: row.created_at,
   };
 }
@@ -109,12 +115,13 @@ export async function createUser(input: { name: string; email: string; password:
   const createdAt = nowIso();
   const passwordHash = bcrypt.hashSync(input.password, 10);
   await sql.transaction(async (tx) => {
+    const verifiedAt = process.env.POSTROOM_AUTO_VERIFY === "1" ? createdAt : null;
     await tx
       .prepare(
-        `INSERT INTO users (id, email, password_hash, name, from_name, from_email, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO users (id, email, password_hash, name, from_name, from_email, created_at, email_verified_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, email, passwordHash, name, name, email, createdAt);
+      .run(id, email, passwordHash, name, name, email, createdAt, verifiedAt);
     const insertTemplate = tx.prepare(
       `INSERT INTO templates (id, user_id, name, subject, html, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -430,7 +437,16 @@ const LINK_CONTACT = `INSERT INTO list_contacts (list_id, contact_id, created_at
 
 export async function addContact(
   userId: string,
-  input: { email: string; firstName: string; lastName: string; listId?: string | null },
+  input: {
+    email: string;
+    firstName: string;
+    lastName: string;
+    listId?: string | null;
+    consentSource?: ConsentSource;
+    consentIp?: string;
+    consentUserAgent?: string;
+    consentNote?: string;
+  },
 ): Promise<{ created: boolean; status: string }> {
   const email = normalizeEmail(input.email);
   if (!isEmail(email)) throw new UserError("Enter a valid email.");
@@ -464,6 +480,15 @@ export async function addContact(
   }
   if (input.listId && id) {
     await sql.prepare(LINK_CONTACT).run(input.listId, id, now);
+  }
+  if (id && (created || input.consentSource)) {
+    await recordConsent(id, {
+      source: input.consentSource || "manual",
+      ip: input.consentIp,
+      userAgent: input.consentUserAgent,
+      note: input.consentNote,
+      confirmedAt: now,
+    });
   }
   const status = existing?.status ?? "subscribed";
   return { created, status };
@@ -515,7 +540,15 @@ export async function removeFromList(userId: string, listId: string, contactId: 
   await sql.prepare("DELETE FROM list_contacts WHERE list_id = ? AND contact_id = ?").run(listId, contactId);
 }
 
-export async function importContacts(userId: string, listId: string | null, csv: string): Promise<ImportResult> {
+export async function importContacts(
+  userId: string,
+  listId: string | null,
+  csv: string,
+  options: { consentAttested?: boolean; consentIp?: string; consentUserAgent?: string } = {},
+): Promise<ImportResult> {
+  if (!options.consentAttested) {
+    throw new UserError("Confirm that everyone on this CSV consented to receive your email before importing.");
+  }
   if (listId && !(await getList(userId, listId))) throw new UserError("List not found.");
   const parsed = readContactCsv(csv);
   const sql = await readySql();
@@ -535,6 +568,20 @@ export async function importContacts(userId: string, listId: string | null, csv:
     const insert = tx.prepare(INSERT_CONTACT);
     const update = tx.prepare(UPDATE_CONTACT_NAMES);
     const link = tx.prepare(LINK_CONTACT);
+    const consent = tx.prepare(
+      `INSERT INTO contact_consent (contact_id, source, consented_at, confirmed_at, ip, user_agent, note)
+       VALUES (?, 'import', ?, ?, ?, ?, ?)
+       ON CONFLICT (contact_id) DO UPDATE SET
+         source = 'import',
+         consented_at = excluded.consented_at,
+         confirmed_at = excluded.confirmed_at,
+         ip = excluded.ip,
+         user_agent = excluded.user_agent,
+         note = excluded.note`,
+    );
+    const note = "CSV import with consent attestation";
+    const ip = (options.consentIp || "").slice(0, 80);
+    const ua = (options.consentUserAgent || "").slice(0, 300);
     for (const contact of parsed.contacts) {
       if (blocked.has(contact.email)) {
         suppressed += 1;
@@ -552,6 +599,7 @@ export async function importContacts(userId: string, listId: string | null, csv:
         updated += 1;
         if (existing.status === "unsubscribed") keptUnsubscribed += 1;
       }
+      await consent.run(id, now, now, ip, ua, note);
       if (listId) {
         addedToList += await link.run(listId, id, now);
       }
@@ -570,20 +618,62 @@ export async function importContacts(userId: string, listId: string | null, csv:
 export async function contactsCsv(userId: string, listId: string | null): Promise<string | null> {
   if (listId && !(await getList(userId, listId))) return null;
   const sql = await readySql();
+  const select = `SELECT c.email, c.first_name, c.last_name, c.status,
+            cc.source AS consent_source, cc.consented_at, cc.confirmed_at, cc.ip AS consent_ip, cc.user_agent AS consent_user_agent, cc.note AS consent_note`;
   const rows = (await (listId
     ? sql
         .prepare(
-          `SELECT c.email, c.first_name, c.last_name, c.status
-           FROM contacts c JOIN list_contacts lc ON lc.contact_id = c.id
+          `${select}
+           FROM contacts c
+           JOIN list_contacts lc ON lc.contact_id = c.id
+           LEFT JOIN contact_consent cc ON cc.contact_id = c.id
            WHERE lc.list_id = ? AND c.user_id = ? ORDER BY c.email`,
         )
         .all(listId, userId)
     : sql
-        .prepare("SELECT email, first_name, last_name, status FROM contacts WHERE user_id = ? ORDER BY email")
-        .all(userId))) as { email: string; first_name: string; last_name: string; status: string }[];
+        .prepare(
+          `${select}
+           FROM contacts c
+           LEFT JOIN contact_consent cc ON cc.contact_id = c.id
+           WHERE c.user_id = ? ORDER BY c.email`,
+        )
+        .all(userId))) as {
+    email: string;
+    first_name: string;
+    last_name: string;
+    status: string;
+    consent_source: string | null;
+    consented_at: string | null;
+    confirmed_at: string | null;
+    consent_ip: string | null;
+    consent_user_agent: string | null;
+    consent_note: string | null;
+  }[];
   return toCsv([
-    ["email", "first_name", "last_name", "status"],
-    ...rows.map((row) => [row.email, row.first_name, row.last_name, row.status]),
+    [
+      "email",
+      "first_name",
+      "last_name",
+      "status",
+      "consent_source",
+      "consented_at",
+      "confirmed_at",
+      "consent_ip",
+      "consent_user_agent",
+      "consent_note",
+    ],
+    ...rows.map((row) => [
+      row.email,
+      row.first_name,
+      row.last_name,
+      row.status,
+      row.consent_source || "",
+      row.consented_at || "",
+      row.confirmed_at || "",
+      row.consent_ip || "",
+      row.consent_user_agent || "",
+      row.consent_note || "",
+    ]),
   ]);
 }
 
@@ -792,6 +882,7 @@ export async function subscribedCount(userId: string, listId: string | null): Pr
 }
 
 export async function queueCampaign(userId: string, campaignId: string, origin: string): Promise<{ queued: number }> {
+  await requireEmailVerified(userId);
   const campaign = await getCampaign(userId, campaignId);
   if (!campaign) throw new UserError("Campaign not found.");
   if (campaign.status !== "draft") throw new UserError("This campaign has already been queued.");
@@ -976,26 +1067,33 @@ export async function releaseStaleClaims(): Promise<void> {
 
 export async function claimBatch(limit: number): Promise<SendJob[]> {
   const sql = await readySql();
-  const claimed = await sql.transaction(async (tx) => {
-    const ids = (await tx
-      .prepare(
-        `SELECT r.id FROM recipients r
-         JOIN campaigns c ON c.id = r.campaign_id
-         WHERE r.status = 'pending'
-           AND (c.status = 'sending'
-             OR (c.status = 'automation'
-                 AND EXISTS (SELECT 1 FROM automations a WHERE a.campaign_id = c.id AND a.status = 'active')))
-         ORDER BY r.created_at LIMIT ?`,
-      )
-      .all(limit)) as { id: string }[];
-    const claim = tx.prepare("UPDATE recipients SET status = 'sending', claimed_at = ? WHERE id = ? AND status = 'pending'");
-    const now = nowIso();
-    const won: string[] = [];
-    for (const row of ids) {
-      if ((await claim.run(now, row.id)) === 1) won.push(row.id);
-    }
-    return won;
-  });
+  const now = nowIso();
+  // Pull a wider candidate set so per-account send ceilings can skip some rows without starving the batch.
+  const candidates = (await sql
+    .prepare(
+      `SELECT r.id, c.user_id FROM recipients r
+       JOIN campaigns c ON c.id = r.campaign_id
+       LEFT JOIN recipient_attempts ra ON ra.recipient_id = r.id
+       WHERE r.status = 'pending'
+         AND (ra.next_attempt_at IS NULL OR ra.next_attempt_at <= ?)
+         AND (c.status = 'sending'
+           OR (c.status = 'automation'
+               AND EXISTS (SELECT 1 FROM automations a WHERE a.campaign_id = c.id AND a.status = 'active')))
+       ORDER BY r.created_at LIMIT ?`,
+    )
+    .all(now, Math.max(limit * 5, limit))) as { id: string; user_id: string }[];
+
+  const won: string[] = [];
+  for (const row of candidates) {
+    if (won.length >= limit) break;
+    // Enforce per-account send rate limits (second/minute/hour/day). Over-limit rows stay pending for a later cycle.
+    if (!(await tryReserveSend(row.user_id))) continue;
+    const claimed = await sql
+      .prepare("UPDATE recipients SET status = 'sending', claimed_at = ? WHERE id = ? AND status = 'pending'")
+      .run(now, row.id);
+    if (claimed === 1) won.push(row.id);
+  }
+  const claimed = won;
   if (claimed.length === 0) return [];
   const placeholders = claimed.map(() => "?").join(", ");
   const rows = await sql
@@ -1084,34 +1182,55 @@ export async function finishCampaigns(): Promise<void> {
     .run(now, now);
 }
 
-export async function recordOpen(token: string): Promise<void> {
+export type RecordTrackOptions = TrackMeta;
+
+export async function recordOpen(token: string, meta: RecordTrackOptions = {}): Promise<void> {
   const sql = await readySql();
-  const row = (await sql.prepare("SELECT id, campaign_id FROM recipients WHERE token = ?").get(token)) as
-    | { id: string; campaign_id: string }
+  const row = (await sql.prepare("SELECT id, campaign_id, sent_at FROM recipients WHERE token = ?").get(token)) as
+    | { id: string; campaign_id: string; sent_at: string | null }
     | null;
   if (!row) return;
+  const verdict = classifyTracking({ ...meta, sentAt: row.sent_at });
   const now = nowIso();
+  await sql
+    .prepare(
+      "INSERT INTO events (id, campaign_id, recipient_id, type, url, created_at, bot) VALUES (?, ?, ?, 'open', '', ?, ?)",
+    )
+    .run(newId(), row.campaign_id, row.id, now, verdict.bot ? 1 : 0);
+  if (verdict.bot) return;
   await sql
     .prepare("UPDATE recipients SET open_count = open_count + 1, opened_at = COALESCE(opened_at, ?) WHERE id = ?")
     .run(now, row.id);
-  await sql
-    .prepare("INSERT INTO events (id, campaign_id, recipient_id, type, url, created_at) VALUES (?, ?, ?, 'open', '', ?)")
-    .run(newId(), row.campaign_id, row.id, now);
 }
 
-export async function recordClick(token: string, url: string): Promise<void> {
+export async function recordClick(token: string, url: string, meta: RecordTrackOptions = {}): Promise<void> {
   const sql = await readySql();
-  const row = (await sql.prepare("SELECT id, campaign_id FROM recipients WHERE token = ?").get(token)) as
-    | { id: string; campaign_id: string }
+  const row = (await sql.prepare("SELECT id, campaign_id, sent_at FROM recipients WHERE token = ?").get(token)) as
+    | { id: string; campaign_id: string; sent_at: string | null }
     | null;
   if (!row) return;
   const now = nowIso();
+  const since = new Date(Date.now() - 1000).toISOString();
+  const recent = (await sql
+    .prepare(
+      `SELECT url FROM events WHERE recipient_id = ? AND type = 'click' AND created_at >= ? ORDER BY created_at DESC LIMIT 10`,
+    )
+    .all(row.id, since)) as { url: string }[];
+  const verdict = classifyTracking({
+    ...meta,
+    sentAt: row.sent_at,
+    url,
+    recentClickUrls: recent.map((r) => r.url),
+  });
+  await sql
+    .prepare(
+      "INSERT INTO events (id, campaign_id, recipient_id, type, url, created_at, bot) VALUES (?, ?, ?, 'click', ?, ?, ?)",
+    )
+    .run(newId(), row.campaign_id, row.id, url.slice(0, 2000), now, verdict.bot ? 1 : 0);
+  if (verdict.bot) return;
   await sql
     .prepare("UPDATE recipients SET click_count = click_count + 1, clicked_at = COALESCE(clicked_at, ?) WHERE id = ?")
     .run(now, row.id);
-  await sql
-    .prepare("INSERT INTO events (id, campaign_id, recipient_id, type, url, created_at) VALUES (?, ?, ?, 'click', ?, ?)")
-    .run(newId(), row.campaign_id, row.id, url.slice(0, 2000), now);
   // Automations can be set to stop a person's series as soon as they click any link in it.
   const stopped = await sql
     .prepare(
