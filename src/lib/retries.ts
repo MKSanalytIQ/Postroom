@@ -1,5 +1,4 @@
 import { readySql } from "./sql";
-import { nowIso } from "./time";
 
 /** Max SMTP attempts (initial try + retries) before a recipient is marked failed. */
 export const MAX_SEND_ATTEMPTS = 5;
@@ -32,7 +31,6 @@ export type ScheduleRetryResult = {
  */
 export async function scheduleTransientRetry(recipientId: string, error: string): Promise<ScheduleRetryResult> {
   const sql = await readySql();
-  const now = nowIso();
   return sql.transaction(async (tx) => {
     const row = (await tx
       .prepare("SELECT attempt_count FROM recipient_attempts WHERE recipient_id = ?")

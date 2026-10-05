@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { ConfirmSubmit, Flash, PageHeader, Pill, SubmitButton } from "@/components/ui";
-import { deleteAccountAction } from "@/lib/actions/auth";
+import { changePasswordAction, deleteAccountAction } from "@/lib/actions/auth";
 import { checkSenderAction, clearWebhookTokenAction } from "@/lib/actions/deliverability";
 import { saveSettingsAction, testSmtpAction } from "@/lib/actions/settings";
 import { getDeliverabilitySettings } from "@/lib/deliverability";
@@ -166,6 +166,21 @@ export default async function SettingsPage({
             <ConfirmSubmit label="Turn off" message="Turn the webhook off? Bounce reports will stop being accepted." />
           </form>
         ) : null}
+      </section>
+      <section id="password" className="panel stack">
+        <h2>Change password</h2>
+        <p className="fine">Changing your password signs out every other device.</p>
+        <form action={changePasswordAction} className="stack">
+          <label className="field">
+            <span>Current password</span>
+            <input name="currentPassword" type="password" autoComplete="current-password" required />
+          </label>
+          <label className="field">
+            <span>New password</span>
+            <input name="newPassword" type="password" autoComplete="new-password" minLength={8} required />
+          </label>
+          <SubmitButton className="btn btn-ghost">Change password</SubmitButton>
+        </form>
       </section>
       <form action={deleteAccountAction} className="danger-zone">
         <h2>Delete account</h2>
