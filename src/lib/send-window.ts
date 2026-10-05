@@ -6,7 +6,7 @@ export type SendWindow = {
   days: number[];
   /** First allowed hour of the day, 0-23. */
   startHour: number;
-  /** Hour the window closes, 1-24 (exclusive): 9 to 17 allows 09:00 up to 16:59. */
+  /** Hour the window closes, 1-24 (exclusive). When <= startHour the window wraps past midnight. */
   endHour: number;
   /** IANA timezone name, for example "UTC" or "America/New_York". */
   timezone: string;
@@ -61,9 +61,21 @@ export function validateWindow(input: SendWindow): SendWindow {
   if (!Number.isInteger(input.endHour) || input.endHour < 1 || input.endHour > 24) {
     throw new Error("End hour must be between 1 and 24.");
   }
-  if (input.endHour <= input.startHour) throw new Error("The window must end after it starts.");
+  // endHour <= startHour means the window wraps past midnight (e.g. 22→06).
+  // endHour === startHour is treated as a full 24-hour window on the selected days.
   if (!isValidTimeZone(input.timezone)) throw new Error("Choose a valid timezone.");
   return { days, startHour: input.startHour, endHour: input.endHour, timezone: input.timezone };
+}
+
+/** Whether a local hour falls inside the window. Supports overnight wraps. */
+export function hourInWindow(hour: number, startHour: number, endHour: number): boolean {
+  if (endHour > startHour) return hour >= startHour && hour < endHour;
+  if (endHour < startHour) return hour >= startHour || hour < endHour;
+  return true;
+}
+
+export function windowWrapsOvernight(window: Pick<SendWindow, "startHour" | "endHour">): boolean {
+  return window.endHour <= window.startHour;
 }
 
 const formatters = new Map<string, Intl.DateTimeFormat>();
@@ -97,7 +109,7 @@ function localParts(date: Date, timezone: string): { day: number; hour: number; 
 
 export function isInWindow(date: Date, window: SendWindow): boolean {
   const local = localParts(date, window.timezone);
-  return window.days.includes(local.day) && local.hour >= window.startHour && local.hour < window.endHour;
+  return window.days.includes(local.day) && hourInWindow(local.hour, window.startHour, window.endHour);
 }
 
 /**
@@ -111,8 +123,23 @@ export function nextAllowedTime(from: Date, window: SendWindow): Date | null {
   for (let step = 0; step < 14 * 4; step += 1) {
     const local = localParts(current, window.timezone);
     const allowedDay = window.days.includes(local.day);
-    if (allowedDay && local.hour >= window.startHour && local.hour < window.endHour) return current;
-    const hoursToSkip = allowedDay && local.hour < window.startHour ? window.startHour - local.hour : 24 - local.hour;
+    if (allowedDay && hourInWindow(local.hour, window.startHour, window.endHour)) return current;
+
+    let hoursToSkip: number;
+    if (!allowedDay) {
+      hoursToSkip = 24 - local.hour;
+    } else if (windowWrapsOvernight(window)) {
+      // Gap is [endHour, startHour) on an overnight window.
+      if (local.hour >= window.endHour && local.hour < window.startHour) {
+        hoursToSkip = window.startHour - local.hour;
+      } else {
+        hoursToSkip = 24 - local.hour;
+      }
+    } else if (local.hour < window.startHour) {
+      hoursToSkip = window.startHour - local.hour;
+    } else {
+      hoursToSkip = 24 - local.hour;
+    }
     // Land exactly on the hour: take off the minutes, seconds, and milliseconds already elapsed.
     const elapsedMs = (local.minute * 60 + local.second) * 1000 + current.getMilliseconds();
     current = new Date(current.getTime() + hoursToSkip * 3_600_000 - elapsedMs);

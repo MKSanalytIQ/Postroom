@@ -156,7 +156,8 @@ test("rules default to off and can be saved, validated, and changed while runnin
     await assert.rejects(saveRules(user.id, id, { ...NO_RULES, exitListId: listId }), /different list/);
     await assert.rejects(saveRules(user.id, id, { ...NO_RULES, exitListId: "missing" }), /List not found/);
     await assert.rejects(saveRules(user.id, id, { ...NO_RULES, windowEnabled: true, windowDays: [] }), /at least one day/);
-    await assert.rejects(saveRules(user.id, id, { ...NO_RULES, windowEnabled: true, windowStartHour: 18 }), /end after/);
+    await saveRules(user.id, id, { ...NO_RULES, windowEnabled: true, windowStartHour: 22, windowEndHour: 6, windowDays: [1, 2] });
+    assert.equal((await getRules(user.id, id)).windowEndHour, 6);
     await assert.rejects(saveRules(user.id, id, { ...NO_RULES, windowEnabled: true, timezone: "Mars/Base" }), /timezone/);
 
     const input: RulesInput = {

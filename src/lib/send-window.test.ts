@@ -56,8 +56,8 @@ test("single day, full-day, and impossible windows", () => {
 test("window validation and day parsing", () => {
   assert.deepEqual(validateWindow({ ...WEEKDAYS_9_TO_5, days: [5, 1, 1, 9, -1, 3] }).days, [1, 3, 5]);
   assert.throws(() => validateWindow({ ...WEEKDAYS_9_TO_5, days: [] }), /at least one day/);
-  assert.throws(() => validateWindow({ ...WEEKDAYS_9_TO_5, startHour: 17, endHour: 9 }), /end after/);
-  assert.throws(() => validateWindow({ ...WEEKDAYS_9_TO_5, startHour: 9, endHour: 9 }), /end after/);
+  assert.deepEqual(validateWindow({ ...WEEKDAYS_9_TO_5, startHour: 22, endHour: 6 }).endHour, 6);
+  assert.deepEqual(validateWindow({ ...WEEKDAYS_9_TO_5, startHour: 9, endHour: 9 }).endHour, 9);
   assert.throws(() => validateWindow({ ...WEEKDAYS_9_TO_5, startHour: 24 }), /Start hour/);
   assert.throws(() => validateWindow({ ...WEEKDAYS_9_TO_5, endHour: 25 }), /End hour/);
   assert.throws(() => validateWindow({ ...WEEKDAYS_9_TO_5, timezone: "Mars/Olympus" }), /timezone/);
@@ -69,4 +69,18 @@ test("window validation and day parsing", () => {
   assert.equal(timeZoneOptions()[0], "UTC");
   assert.ok(timeZoneOptions().includes("Europe/London"));
   assert.deepEqual(parseDays(""), []);
+});
+
+test("overnight windows wrap past midnight", () => {
+  const overnight: SendWindow = { days: [1, 2], startHour: 22, endHour: 6, timezone: "UTC" }; // Mon+Tue
+  // Monday 23:00 UTC is inside.
+  assert.equal(isInWindow(new Date("2026-10-05T23:30:00.000Z"), overnight), true); // Mon
+  // Tuesday 03:00 inside.
+  assert.equal(isInWindow(new Date("2026-10-06T03:00:00.000Z"), overnight), true);
+  // Tuesday 10:00 outside; next opening is Tuesday 22:00.
+  assert.equal(next("2026-10-06T10:00:00.000Z", overnight), "2026-10-06T22:00:00.000Z");
+  // Monday 10:00 -> Monday 22:00.
+  assert.equal(next("2026-10-05T10:00:00.000Z", overnight), "2026-10-05T22:00:00.000Z");
+  // Sunday (not allowed) afternoon -> Monday 00:00 (early segment of the overnight window).
+  assert.equal(next("2026-10-04T15:00:00.000Z", overnight), "2026-10-05T00:00:00.000Z");
 });
