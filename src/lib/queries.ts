@@ -22,6 +22,8 @@ import type {
 } from "./types";
 import { recordConsent, type ConsentSource } from "./consent";
 import { tryReserveSend } from "./send-limits";
+import { requireEmailVerified } from "./email-verification";
+import { classifyTracking, type TrackMeta } from "./scanner";
 import { UserError } from "./user-error";
 import { isEmail, normalizeEmail, sendBlockers } from "./validators";
 
@@ -62,10 +64,11 @@ type UserRow = {
   smtp_user: string;
   smtp_pass: string;
   created_at: string;
+  email_verified_at: string | null;
 };
 
 const USER_COLUMNS = `id, email, password_hash, name, company_name, postal_address, from_name, from_email, reply_to,
-  smtp_host, smtp_port, smtp_secure, smtp_user, smtp_pass, created_at`;
+  smtp_host, smtp_port, smtp_secure, smtp_user, smtp_pass, created_at, email_verified_at`;
 
 function toAccount(row: UserRow): Account {
   return {
@@ -83,6 +86,7 @@ function toAccount(row: UserRow): Account {
     smtpUser: row.smtp_user,
     smtpConfigured: row.smtp_host.trim() !== "",
     hasSmtpPassword: row.smtp_pass.trim() !== "",
+    emailVerified: Boolean(row.email_verified_at),
     createdAt: row.created_at,
   };
 }
@@ -111,12 +115,13 @@ export async function createUser(input: { name: string; email: string; password:
   const createdAt = nowIso();
   const passwordHash = bcrypt.hashSync(input.password, 10);
   await sql.transaction(async (tx) => {
+    const verifiedAt = process.env.POSTROOM_AUTO_VERIFY === "1" ? createdAt : null;
     await tx
       .prepare(
-        `INSERT INTO users (id, email, password_hash, name, from_name, from_email, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO users (id, email, password_hash, name, from_name, from_email, created_at, email_verified_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, email, passwordHash, name, name, email, createdAt);
+      .run(id, email, passwordHash, name, name, email, createdAt, verifiedAt);
     const insertTemplate = tx.prepare(
       `INSERT INTO templates (id, user_id, name, subject, html, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -877,6 +882,7 @@ export async function subscribedCount(userId: string, listId: string | null): Pr
 }
 
 export async function queueCampaign(userId: string, campaignId: string, origin: string): Promise<{ queued: number }> {
+  await requireEmailVerified(userId);
   const campaign = await getCampaign(userId, campaignId);
   if (!campaign) throw new UserError("Campaign not found.");
   if (campaign.status !== "draft") throw new UserError("This campaign has already been queued.");
@@ -1176,34 +1182,55 @@ export async function finishCampaigns(): Promise<void> {
     .run(now, now);
 }
 
-export async function recordOpen(token: string): Promise<void> {
+export type RecordTrackOptions = TrackMeta;
+
+export async function recordOpen(token: string, meta: RecordTrackOptions = {}): Promise<void> {
   const sql = await readySql();
-  const row = (await sql.prepare("SELECT id, campaign_id FROM recipients WHERE token = ?").get(token)) as
-    | { id: string; campaign_id: string }
+  const row = (await sql.prepare("SELECT id, campaign_id, sent_at FROM recipients WHERE token = ?").get(token)) as
+    | { id: string; campaign_id: string; sent_at: string | null }
     | null;
   if (!row) return;
+  const verdict = classifyTracking({ ...meta, sentAt: row.sent_at });
   const now = nowIso();
+  await sql
+    .prepare(
+      "INSERT INTO events (id, campaign_id, recipient_id, type, url, created_at, bot) VALUES (?, ?, ?, 'open', '', ?, ?)",
+    )
+    .run(newId(), row.campaign_id, row.id, now, verdict.bot ? 1 : 0);
+  if (verdict.bot) return;
   await sql
     .prepare("UPDATE recipients SET open_count = open_count + 1, opened_at = COALESCE(opened_at, ?) WHERE id = ?")
     .run(now, row.id);
-  await sql
-    .prepare("INSERT INTO events (id, campaign_id, recipient_id, type, url, created_at) VALUES (?, ?, ?, 'open', '', ?)")
-    .run(newId(), row.campaign_id, row.id, now);
 }
 
-export async function recordClick(token: string, url: string): Promise<void> {
+export async function recordClick(token: string, url: string, meta: RecordTrackOptions = {}): Promise<void> {
   const sql = await readySql();
-  const row = (await sql.prepare("SELECT id, campaign_id FROM recipients WHERE token = ?").get(token)) as
-    | { id: string; campaign_id: string }
+  const row = (await sql.prepare("SELECT id, campaign_id, sent_at FROM recipients WHERE token = ?").get(token)) as
+    | { id: string; campaign_id: string; sent_at: string | null }
     | null;
   if (!row) return;
   const now = nowIso();
+  const since = new Date(Date.now() - 1000).toISOString();
+  const recent = (await sql
+    .prepare(
+      `SELECT url FROM events WHERE recipient_id = ? AND type = 'click' AND created_at >= ? ORDER BY created_at DESC LIMIT 10`,
+    )
+    .all(row.id, since)) as { url: string }[];
+  const verdict = classifyTracking({
+    ...meta,
+    sentAt: row.sent_at,
+    url,
+    recentClickUrls: recent.map((r) => r.url),
+  });
+  await sql
+    .prepare(
+      "INSERT INTO events (id, campaign_id, recipient_id, type, url, created_at, bot) VALUES (?, ?, ?, 'click', ?, ?, ?)",
+    )
+    .run(newId(), row.campaign_id, row.id, url.slice(0, 2000), now, verdict.bot ? 1 : 0);
+  if (verdict.bot) return;
   await sql
     .prepare("UPDATE recipients SET click_count = click_count + 1, clicked_at = COALESCE(clicked_at, ?) WHERE id = ?")
     .run(now, row.id);
-  await sql
-    .prepare("INSERT INTO events (id, campaign_id, recipient_id, type, url, created_at) VALUES (?, ?, ?, 'click', ?, ?)")
-    .run(newId(), row.campaign_id, row.id, url.slice(0, 2000), now);
   // Automations can be set to stop a person's series as soon as they click any link in it.
   const stopped = await sql
     .prepare(

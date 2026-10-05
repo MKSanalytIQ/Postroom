@@ -6,6 +6,7 @@ import { assertAuthAllowed, clearAuthFailures, recordAuthFailure } from "../abus
 import { log } from "../log";
 import { requestOrigin } from "../origin";
 import { changePassword, requestPasswordReset, resetPasswordWithToken } from "../password-reset";
+import { sendVerificationEmail } from "../email-verification";
 import { createSession, createUser, deleteAccount, deleteSession, verifyPassword } from "../queries";
 import { SESSION_COOKIE, requireUser, setSessionCookie } from "../session";
 import { UserError } from "../user-error";
@@ -31,12 +32,28 @@ export async function signupAction(formData: FormData): Promise<void> {
       password: String(formData.get("password") || ""),
     });
     await setSessionCookie(await createSession(user.id));
+    try {
+      await sendVerificationEmail({ userId: user.id, origin: await requestOrigin(), ip });
+    } catch {
+      // Account exists; verification can be resent from Settings.
+    }
     log.info("signup", { userId: user.id, ip });
   } catch (error) {
     if (error instanceof UserError) redirect(withMessage("/signup", "error", error.message));
     throw error;
   }
-  redirect(next);
+  redirect(withMessage(next, "notice", "Check your email for a verification link before sending campaigns."));
+}
+
+export async function resendVerificationAction(): Promise<void> {
+  const user = await requireUser();
+  try {
+    await sendVerificationEmail({ userId: user.id, origin: await requestOrigin(), ip: await clientIp() });
+  } catch (error) {
+    if (error instanceof UserError) redirect(withMessage("/app/settings#verify", "error", error.message));
+    throw error;
+  }
+  redirect(withMessage("/app/settings#verify", "notice", "Verification email sent. Check your inbox (or the server console in development)."));
 }
 
 export async function loginAction(formData: FormData): Promise<void> {
