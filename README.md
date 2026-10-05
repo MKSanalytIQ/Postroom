@@ -156,6 +156,8 @@ Copy `.env.example` to `.env.local` if you want to set these. Local use works wi
 - `APP_ORIGIN` — public URL written into tracking and unsubscribe links. Leave unset locally and Postroom uses the request host.
 - `APP_SECRET` — encrypts SMTP passwords and signs click links. If unset, a secret is created in `data/app.secret`. Required on Vercel and any other host without a persistent disk.
 - `SEND_DELAY_MS` — pause between messages. Default 250.
+- `CRON_SECRET` — shared secret for the Vercel Cron worker route. Required on Vercel so `/api/cron/worker` only runs when called with `Authorization: Bearer ${CRON_SECRET}` (Vercel sends this automatically when the env var is set). Generate a long random string.
+- `CRON_TIME_BUDGET_MS` — optional soft wall-clock budget in milliseconds for one cron invocation when Vercel does not expose a deadline. Default 15000.
 
 ## Database
 
@@ -173,9 +175,28 @@ To use Postgres locally, point `DATABASE_URL` at it, for example `postgres://pos
 
 1. Create the database as described above so that `DATABASE_URL` is set for Production (and Preview if you use it).
 2. Set `APP_SECRET` to a long random string, and `APP_ORIGIN` to the public URL.
-3. Redeploy. The tables are created on the first request.
+3. Set `CRON_SECRET` to a long random string (Production and Preview). Vercel Cron sends it as `Authorization: Bearer ${CRON_SECRET}` when it hits the worker route.
+4. Redeploy. The tables are created on the first request. Cron jobs from `vercel.json` are registered on deploy.
 
-Vercel does not run the background send worker. Run `npm run worker` on a machine that stays on, with the same `DATABASE_URL` and `APP_SECRET`, so that queued campaigns get sent.
+#### Background worker on Vercel Cron
+
+Queued campaigns and automations are advanced by `GET /api/cron/worker`, which calls the same `runWorkerCycle` path as `npm run worker`. Each invocation:
+
+- requires `Authorization: Bearer ${CRON_SECRET}` (rejected if the secret is missing or wrong)
+- runs one or more cycles with a time and cycle budget so the function finishes within Vercel limits
+- stays idempotent: work is claimed in database transactions, so overlapping runs do not double-send
+
+The schedule lives in `vercel.json` (path `/api/cron/worker`). **Hobby** plans allow at most one cron run per day; expressions that fire more often fail deploy. **Pro** (and Enterprise) allow schedules as frequent as every minute (`* * * * *`). This repo defaults to `0 0 * * *` (once daily, midnight UTC) so Hobby deploys succeed. If your team is on Pro, change the expression in `vercel.json` to a shorter interval (for example `* * * * *`) and redeploy so campaigns send promptly.
+
+Local development is unchanged: `npm run dev` still starts the site and the forever worker together, and `npm run worker` still works on its own.
+
+To verify the cron route on a preview deployment without sending real mail (SMTP unset → capture mode):
+
+```bash
+curl -sS -H "Authorization: Bearer $CRON_SECRET" "https://<preview-host>/api/cron/worker"
+```
+
+A healthy empty queue returns HTTP 200 with JSON like `{"ok":true,"cycles":1,"work":0,"stoppedReason":"idle"}`.
 
 ## Tests
 
